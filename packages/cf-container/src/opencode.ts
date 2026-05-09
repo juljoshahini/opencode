@@ -1,0 +1,156 @@
+import { WORKSPACE } from "./paths"
+
+const BASE = process.env.OPENCODE_INTERNAL_URL ?? "http://127.0.0.1:4096"
+
+function authHeader(): Record<string, string> {
+  const password = process.env.OPENCODE_SERVER_PASSWORD
+  if (!password) return {}
+  const username = process.env.OPENCODE_SERVER_USERNAME ?? "opencode"
+  const token = Buffer.from(`${username}:${password}`).toString("base64")
+  return { Authorization: `Basic ${token}` }
+}
+
+function headers(extra?: Record<string, string>): Record<string, string> {
+  return {
+    "content-type": "application/json",
+    "x-opencode-directory": WORKSPACE,
+    ...authHeader(),
+    ...(extra ?? {}),
+  }
+}
+
+export async function ready(timeoutMs = 30_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  let lastError: unknown
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${BASE}/path`, { headers: headers() })
+      if (res.ok) return
+      lastError = new Error(`opencode /path returned ${res.status}`)
+    } catch (e) {
+      lastError = e
+    }
+    await Bun.sleep(250)
+  }
+  throw new Error(`opencode not ready: ${String(lastError)}`)
+}
+
+export type CreateSessionInput = {
+  title?: string
+  agent?: string
+  permission?: unknown
+}
+
+export type SessionInfo = { id: string; title?: string; directory?: string }
+
+export async function createSession(input: CreateSessionInput = {}): Promise<SessionInfo> {
+  const res = await fetch(`${BASE}/session`, {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify(input),
+  })
+  if (!res.ok) throw new Error(`create session failed: ${res.status} ${await res.text()}`)
+  return (await res.json()) as SessionInfo
+}
+
+export async function deleteSession(sessionID: string): Promise<void> {
+  await fetch(`${BASE}/session/${sessionID}`, {
+    method: "DELETE",
+    headers: headers(),
+  })
+}
+
+export async function sessionExists(sessionID: string): Promise<boolean> {
+  const res = await fetch(`${BASE}/session/${sessionID}`, {
+    headers: headers(),
+  })
+  if (res.status === 200) return true
+  if (res.status === 404) return false
+  throw new Error(`session lookup failed: ${res.status}`)
+}
+
+export type Turn = { role: "user" | "assistant"; text: string; time?: number }
+
+type RawMessage = {
+  info?: { role?: string; time?: { created?: number } }
+  parts?: Array<{ type?: string; text?: string }>
+}
+
+export async function fetchTranscript(sessionID: string): Promise<Turn[]> {
+  const res = await fetch(`${BASE}/session/${sessionID}/messages`, { headers: headers() })
+  if (!res.ok) {
+    if (res.status === 404) return []
+    throw new Error(`fetch messages failed: ${res.status}`)
+  }
+  const messages = (await res.json()) as RawMessage[]
+  const turns: Turn[] = []
+  for (const m of messages) {
+    const role = m.info?.role
+    if (role !== "user" && role !== "assistant") continue
+    const text = (m.parts ?? [])
+      .filter((p) => p.type === "text" && typeof p.text === "string")
+      .map((p) => p.text!.trim())
+      .filter(Boolean)
+      .join("\n\n")
+    if (!text) continue
+    turns.push({ role, text, time: m.info?.time?.created })
+  }
+  return turns
+}
+
+export type PromptInput = {
+  prompt: string
+  agent?: string
+  model?: { providerID: string; id?: string; modelID?: string; variant?: string }
+  variant?: string
+  system?: string
+}
+
+export async function promptAsync(sessionID: string, input: PromptInput): Promise<void> {
+  const body = {
+    agent: input.agent,
+    model: input.model
+      ? {
+          providerID: input.model.providerID,
+          modelID: input.model.modelID ?? input.model.id,
+          variant: input.model.variant ?? input.variant,
+        }
+      : undefined,
+    variant: input.variant,
+    system: input.system,
+    parts: [{ type: "text", text: input.prompt }],
+  }
+  const res = await fetch(`${BASE}/session/${sessionID}/prompt_async`, {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify(body),
+  })
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`prompt failed: ${res.status} ${await res.text()}`)
+  }
+}
+
+export async function permissionReply(
+  requestID: string,
+  reply: "once" | "always" | "reject",
+): Promise<void> {
+  const res = await fetch(`${BASE}/permission/${requestID}/reply`, {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify({ reply }),
+  })
+  if (!res.ok) {
+    throw new Error(`permission reply failed: ${res.status} ${await res.text()}`)
+  }
+}
+
+export async function eventStream(signal: AbortSignal): Promise<Response> {
+  const res = await fetch(`${BASE}/event`, {
+    headers: { ...authHeader(), "x-opencode-directory": WORKSPACE, accept: "text/event-stream" },
+    signal,
+  })
+  if (!res.ok || !res.body) {
+    throw new Error(`event subscribe failed: ${res.status}`)
+  }
+  return res
+}

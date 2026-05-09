@@ -18,7 +18,12 @@
     "prepare": "husky",
     "random": "echo 'Random script'",
     "hello": "echo 'Hello World!'",
-    "test": "echo 'do not run tests from root' && exit 1"
+    "test": "echo 'do not run tests from root' && exit 1",
+    "cf:deploy": "bun run --cwd packages/cf-worker deploy",
+    "cf:dev": "bun run --cwd packages/cf-worker dev",
+    "cf:tail": "bun run --cwd packages/cf-worker tail",
+    "cf:login": "bun run --cwd packages/cf-worker x wrangler login",
+    "cf:secret": "bun run --cwd packages/cf-worker x wrangler secret"
   },
   "workspaces": {
     "packages": [

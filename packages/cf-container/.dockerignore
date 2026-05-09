@@ -1,0 +1,7 @@
+node_modules
+.turbo
+.git
+.DS_Store
+.artifacts
+.cache
+scripts
