@@ -240,6 +240,7 @@ ${renderTranscript(body.priorTranscript)}`
         .catch(async (e) => {
           log.error("prompt.async.failed", { runId, opencodeSessionId: sessionID, error: String(e) })
           await sse(writer, "error", { message: String(e) })
+          abort.abort(new Error("prompt_async failed"))
         })
 
       let idle = false
