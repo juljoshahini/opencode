@@ -1,0 +1,17 @@
+Generate an image from a text prompt using OpenAI gpt-image-2 via Cloudflare AI Gateway.
+
+Use this tool whenever the user wants to:
+- Create a hero image, banner, or background for a landing page or website
+- Generate an illustration, icon, photo, logo, or avatar for a UI
+- Produce a placeholder graphic or mockup
+- Add visual content based on a text description
+
+The image is returned as an attachment so it can be referenced or saved with the write tool.
+
+Inputs:
+- prompt (required): Vivid, specific description of the image. Include subject, style, lighting, composition.
+- size: "1024x1024" (square), "1024x1536" (portrait), "1536x1024" (landscape), or "auto". Default: auto.
+- quality: "low", "medium", "high", or "auto". Default: medium.
+- n: Number of images, 1-4. Default: 1.
+
+Do not call this tool unless the user has clearly asked for a generated image. For finding existing images on the web, use webfetch instead.

@@ -1,0 +1,17 @@
+**/node_modules
+**/.turbo
+**/.cache
+**/.artifacts
+**/.wrangler
+**/dist
+**/build
+.git
+.github/workflows
+.github/ISSUE_TEMPLATE
+.github/PULL_REQUEST_TEMPLATE
+**/.DS_Store
+**/.env
+**/.env.local
+*.log
+**/coverage
+**/.next

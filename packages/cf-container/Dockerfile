@@ -1,42 +1,50 @@
-# Build context: this directory (packages/cf-container/).
-# Build with:   docker build -t opencode-cf packages/cf-container
-#
-# The opencode binary is downloaded from anomalyco/opencode GitHub releases
-# at image-build time. Override OPENCODE_VERSION to pin a different version.
+# Build context: repo root (set via wrangler.jsonc image_build_context = "../../").
+# Multi-stage: stage 1 compiles the opencode binary from source so local edits
+# (e.g. new tools in packages/opencode/src/tool/) are baked in. Stage 2 is the
+# slim runtime that ships to Cloudflare Containers.
 
-ARG OPENCODE_VERSION=1.14.41
-
-FROM oven/bun:1-alpine AS base
+FROM oven/bun:1-slim AS builder
 ARG BUN_RUNTIME_TRANSPILER_CACHE_PATH=0
 ENV BUN_RUNTIME_TRANSPILER_CACHE_PATH=${BUN_RUNTIME_TRANSPILER_CACHE_PATH}
-RUN apk add --no-cache libgcc libstdc++ ripgrep tini ca-certificates curl tar
 
-FROM base AS bin-amd64
-ARG OPENCODE_VERSION
-RUN curl -fsSL -o /tmp/opencode.tar.gz \
-    "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64-baseline-musl.tar.gz" \
- && tar -xzf /tmp/opencode.tar.gz -C /tmp \
- && find /tmp -type f -name opencode -executable -exec mv {} /usr/local/bin/opencode \; \
- && rm -rf /tmp/opencode.tar.gz \
- && chmod +x /usr/local/bin/opencode
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      python3 make g++ git build-essential ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 
-FROM base AS bin-arm64
-ARG OPENCODE_VERSION
-RUN curl -fsSL -o /tmp/opencode.tar.gz \
-    "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-arm64-musl.tar.gz" \
- && tar -xzf /tmp/opencode.tar.gz -C /tmp \
- && find /tmp -type f -name opencode -executable -exec mv {} /usr/local/bin/opencode \; \
- && rm -rf /tmp/opencode.tar.gz \
- && chmod +x /usr/local/bin/opencode
+WORKDIR /repo
+COPY . .
 
-ARG TARGETARCH
-FROM bin-${TARGETARCH} AS final
-RUN opencode --version
+# Postinstall scripts are skipped — opencode's HTTP server doesn't need the
+# native node-pty / parcel watcher binaries that those scripts compile.
+RUN bun install --ignore-scripts
+
+# OPENCODE_CHANNEL bypasses the build's `git branch` query (no .git in context).
+# OPENCODE_VERSION pins the binary version string so we don't depend on npm.
+ENV OPENCODE_CHANNEL=latest
+ENV OPENCODE_VERSION=1.14.42-cf
+
+# Single linux-x64-baseline (glibc) binary, no embedded web UI (we don't expose
+# the local /web route through the worker).
+RUN bun run --cwd packages/opencode build --single --baseline --skip-embed-web-ui
+
+# ---
+FROM oven/bun:1-slim AS runtime
+ARG BUN_RUNTIME_TRANSPILER_CACHE_PATH=0
+ENV BUN_RUNTIME_TRANSPILER_CACHE_PATH=${BUN_RUNTIME_TRANSPILER_CACHE_PATH}
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ripgrep tini ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /repo/packages/opencode/dist/opencode-linux-x64-baseline/bin/opencode /usr/local/bin/opencode
+RUN /usr/local/bin/opencode --version
 
 WORKDIR /app
-COPY package.json ./package.json
-COPY tsconfig.json ./tsconfig.json
-COPY src ./src
+COPY packages/cf-container/package.json ./package.json
+COPY packages/cf-container/tsconfig.json ./tsconfig.json
+COPY packages/cf-container/src ./src
 
 RUN mkdir -p /workspace
 ENV WORKSPACE_DIR=/workspace
@@ -45,4 +53,4 @@ ENV OPENCODE_PORT=4096
 ENV SIDECAR_PORT=8080
 EXPOSE 8080
 
-ENTRYPOINT ["/sbin/tini", "--", "bun", "run", "src/start.ts"]
+ENTRYPOINT ["/usr/bin/tini", "--", "bun", "run", "src/start.ts"]

@@ -12,6 +12,8 @@ export interface Env {
   OPENAI_API_KEY?: string
   OPENROUTER_API_KEY?: string
   GOOGLE_GENERATIVE_AI_API_KEY?: string
+  IMAGE_GEN_MODEL?: string
+  R2_PUBLIC_BASE?: string
 }
 
 export const PROVIDER_VARS = [
@@ -19,6 +21,8 @@ export const PROVIDER_VARS = [
   "OPENAI_API_KEY",
   "OPENROUTER_API_KEY",
   "GOOGLE_GENERATIVE_AI_API_KEY",
+  "IMAGE_GEN_MODEL",
+  "R2_PUBLIC_BASE",
 ] as const
 
 export function r2PrefixFor(sessionId: string): string {

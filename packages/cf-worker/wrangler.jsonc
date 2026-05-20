@@ -12,6 +12,7 @@
     {
       "class_name": "OpenCodeSession",
       "image": "../cf-container/Dockerfile",
+      "image_build_context": "../..",
       "name": "opencode-session",
       "instance_type": "standard-1",
       "max_instances": 50

@@ -1,7 +1,11 @@
 import fs from "node:fs/promises"
 import path from "node:path"
+import crypto from "node:crypto"
 import { WORKSPACE, resolveSafe, relTo, PathError } from "./paths"
 import * as Opencode from "./opencode"
+import { log, setBase } from "./log"
+
+setBase({ workerSessionId: process.env.WORKER_SESSION_ID ?? null })
 
 const PORT = Number(process.env.SIDECAR_PORT ?? 8080)
 const TOKEN = process.env.SIDECAR_TOKEN
@@ -144,26 +148,44 @@ function sse(stream: WritableStreamDefaultWriter<Uint8Array>, event: string, dat
 }
 
 async function handlePrompt(req: Request): Promise<Response> {
+  const runId = crypto.randomUUID().slice(0, 8)
+  const t0 = Date.now()
   let body: PromptBody
   try {
     body = (await req.json()) as PromptBody
   } catch {
+    log.error("prompt.body.invalid", { runId })
     return err("invalid JSON body")
   }
-  if (!body.prompt || typeof body.prompt !== "string") return err("missing 'prompt'")
+  if (!body.prompt || typeof body.prompt !== "string") {
+    log.warn("prompt.missing", { runId })
+    return err("missing 'prompt'")
+  }
+
+  log.info("prompt.start", {
+    runId,
+    promptLen: body.prompt.length,
+    hasSessionId: Boolean(body.sessionId),
+    agent: body.agent ?? null,
+    model: body.model ? `${body.model.providerID}/${body.model.id}` : null,
+    hasPriorTranscript: Boolean(body.priorTranscript?.length),
+  })
 
   const defaultPermissions = [
     { permission: "question", action: "deny", pattern: "*" },
-    { permission: "plan_enter", action: "deny", pattern: "*" },
-    { permission: "plan_exit", action: "deny", pattern: "*" },
+    { permission: "plan_enter", action: "allow", pattern: "*" },
+    { permission: "plan_exit", action: "allow", pattern: "*" },
   ]
   let sessionID = body.sessionId
   let isNewSession = false
   if (sessionID) {
     const exists = await Opencode.sessionExists(sessionID).catch(() => false)
     if (!exists) {
+      log.warn("opencode.session.stale", { runId, prior: sessionID })
       sessionID = undefined
       isNewSession = true
+    } else {
+      log.info("opencode.session.reused", { runId, opencodeSessionId: sessionID })
     }
   } else {
     isNewSession = true
@@ -175,6 +197,7 @@ async function handlePrompt(req: Request): Promise<Response> {
       permission: body.permission ?? defaultPermissions,
     })
     sessionID = created.id
+    log.info("opencode.session.created", { runId, opencodeSessionId: sessionID })
   }
 
   let systemPrompt = body.system ?? LANDING_PAGE_SYSTEM
@@ -201,6 +224,7 @@ ${renderTranscript(body.priorTranscript)}`
       await sse(writer, "session", { id: sessionID })
 
       const eventRes = await Opencode.eventStream(abort.signal)
+      log.info("event.subscribe.open", { runId, opencodeSessionId: sessionID })
       const reader = eventRes.body!.getReader()
       const decoder = new TextDecoder()
       let buffer = ""
@@ -211,16 +235,33 @@ ${renderTranscript(body.priorTranscript)}`
         agent: body.agent,
         model: body.model ?? defaultModel,
         system: systemPrompt,
-      }).catch(async (e) => {
-        await sse(writer, "error", { message: String(e) })
       })
+        .then(() => log.info("prompt.async.submitted", { runId, opencodeSessionId: sessionID }))
+        .catch(async (e) => {
+          log.error("prompt.async.failed", { runId, opencodeSessionId: sessionID, error: String(e) })
+          await sse(writer, "error", { message: String(e) })
+        })
 
       let idle = false
       let lastRealEventAt = Date.now()
-      const STALL_MS = 90_000
+      let heartbeatCount = 0
+      let realEventCount = 0
+      let lastRealEventType: string | null = null
+      const STALL_MS = Number(process.env.STALL_MS ?? 300_000)
 
       const stallCheck = setInterval(() => {
-        if (Date.now() - lastRealEventAt > STALL_MS) {
+        const since = Date.now() - lastRealEventAt
+        if (since > STALL_MS) {
+          log.error("watchdog.fire", {
+            runId,
+            opencodeSessionId: sessionID,
+            stallMs: STALL_MS,
+            heartbeatsReceived: heartbeatCount,
+            realEventsReceived: realEventCount,
+            lastRealEventType,
+            sinceLastRealMs: since,
+            elapsedMs: Date.now() - t0,
+          })
           clearInterval(stallCheck)
           abort.abort(new Error(`no non-heartbeat events for ${STALL_MS}ms`))
         }
@@ -255,16 +296,56 @@ ${renderTranscript(body.priorTranscript)}`
             const sid = (event.properties as { sessionID?: string } | undefined)?.sessionID
             if (sid && sid !== sessionID) continue
 
-            if (event.type !== "server.heartbeat") lastRealEventAt = Date.now()
+            if (event.type === "server.heartbeat") {
+              heartbeatCount += 1
+            } else {
+              realEventCount += 1
+              const wasFirst = realEventCount === 1
+              lastRealEventAt = Date.now()
+              lastRealEventType = event.type ?? null
+              if (wasFirst) {
+                log.info("event.first", {
+                  runId,
+                  opencodeSessionId: sessionID,
+                  type: event.type,
+                  msSinceStart: Date.now() - t0,
+                  heartbeatsBefore: heartbeatCount,
+                })
+              }
+              if (event.type === "message.part.updated") {
+                const part = event.properties?.part as { type?: string; tool?: string; state?: { status?: string } } | undefined
+                if (part?.type === "tool" && part.state?.status === "completed") {
+                  log.info("tool.observed", {
+                    runId,
+                    opencodeSessionId: sessionID,
+                    tool: part.tool,
+                    status: part.state.status,
+                  })
+                } else if (part?.type === "tool" && part.state?.status === "error") {
+                  log.warn("tool.observed", {
+                    runId,
+                    opencodeSessionId: sessionID,
+                    tool: part.tool,
+                    status: part.state.status,
+                  })
+                }
+              }
+              if (event.type === "session.error") {
+                log.error("opencode.session.error", { runId, properties: event.properties })
+              }
+            }
 
             await sse(writer, event.type ?? "message", event)
 
             if (event.type === "permission.asked" && sid === sessionID) {
               const reqId = (event.properties as { id?: string } | undefined)?.id
               if (reqId) {
-                Opencode.permissionReply(reqId, "once").catch(async (e) => {
-                  await sse(writer, "error", { message: `permission reply failed: ${e}` }).catch(() => {})
-                })
+                Opencode.permissionReply(reqId, "once")
+                  .then(() => log.info("permission.replied", { runId, requestId: reqId }))
+                  .catch(async (e) => {
+                    log.error("permission.reply.failed", { runId, requestId: reqId, error: String(e) })
+                    await sse(writer, "error", { message: `permission reply failed: ${e}` }).catch(() => {})
+                  })
               }
             }
 
@@ -283,7 +364,16 @@ ${renderTranscript(body.priorTranscript)}`
 
       await promptPromise
       await sse(writer, "done", { sessionId: sessionID })
+      log.info("prompt.done", {
+        runId,
+        opencodeSessionId: sessionID,
+        elapsedMs: Date.now() - t0,
+        realEventsReceived: realEventCount,
+        heartbeatsReceived: heartbeatCount,
+        aborted: abort.signal.aborted,
+      })
     } catch (e) {
+      log.error("prompt.crash", { runId, opencodeSessionId: sessionID, error: String(e) })
       try {
         await sse(writer, "error", { message: String(e) })
       } catch {}
@@ -357,10 +447,10 @@ const server = Bun.serve({
   },
 })
 
-console.log(`sidecar listening on http://0.0.0.0:${server.port} (workspace=${WORKSPACE})`)
+log.info("sidecar.listen", { port: server.port, workspace: WORKSPACE })
 
 const shutdown = () => {
-  console.log("sidecar shutting down")
+  log.info("sidecar.shutdown")
   server.stop()
   process.exit(0)
 }
