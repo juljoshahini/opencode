@@ -10,6 +10,10 @@ import { TaskTool } from "./task"
 import { TodoWriteTool } from "./todo"
 import { WebFetchTool } from "./webfetch"
 import { ImageGenTool } from "./image-gen"
+import { ImageUseTool } from "./image-use"
+import { ImageViewTool } from "./image-view"
+import { UrlScreenshotTool } from "./url-screenshot"
+import { UrlRenderTool } from "./url-render"
 import { WriteTool } from "./write"
 import { InvalidTool } from "./invalid"
 import { SkillTool } from "./skill"
@@ -114,6 +118,10 @@ export const layer: Layer.Layer<
     const plan = yield* PlanExitTool
     const webfetch = yield* WebFetchTool
     const imagegen = yield* ImageGenTool
+    const imageuse = yield* ImageUseTool
+    const imageview = yield* ImageViewTool
+    const urlscreenshot = yield* UrlScreenshotTool
+    const urlrender = yield* UrlRenderTool
     const websearch = yield* WebSearchTool
     const shell = yield* ShellTool
     const globtool = yield* GlobTool
@@ -213,6 +221,10 @@ export const layer: Layer.Layer<
           task: Tool.init(task),
           fetch: Tool.init(webfetch),
           imagegen: Tool.init(imagegen),
+          imageuse: Tool.init(imageuse),
+          imageview: Tool.init(imageview),
+          urlscreenshot: Tool.init(urlscreenshot),
+          urlrender: Tool.init(urlrender),
           todo: Tool.init(todo),
           search: Tool.init(websearch),
           skill: Tool.init(skilltool),
@@ -236,6 +248,10 @@ export const layer: Layer.Layer<
             tool.task,
             tool.fetch,
             tool.imagegen,
+            tool.imageuse,
+            tool.imageview,
+            tool.urlscreenshot,
+            tool.urlrender,
             tool.todo,
             tool.search,
             tool.skill,

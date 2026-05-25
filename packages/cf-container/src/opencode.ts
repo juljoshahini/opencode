@@ -98,15 +98,62 @@ export async function fetchTranscript(sessionID: string): Promise<Turn[]> {
   return turns
 }
 
+export type Attachment = {
+  url: string
+  mime?: string
+  filename?: string
+}
+
+function inferMimeFromUrl(url: string): string | undefined {
+  const m = url.match(/^data:([^;,]+)[;,]/)
+  if (m) return m[1].toLowerCase()
+  const ext = url.split("?")[0].split(".").pop()?.toLowerCase()
+  if (!ext) return undefined
+  const map: Record<string, string> = {
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    webp: "image/webp",
+    gif: "image/gif",
+    svg: "image/svg+xml",
+    pdf: "application/pdf",
+    txt: "text/plain",
+  }
+  return map[ext]
+}
+
+function extFromMime(mime: string): string | undefined {
+  const map: Record<string, string> = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/svg+xml": ".svg",
+    "application/pdf": ".pdf",
+    "text/plain": ".txt",
+  }
+  return map[mime]
+}
+
 export type PromptInput = {
   prompt: string
   agent?: string
   model?: { providerID: string; id?: string; modelID?: string; variant?: string }
   variant?: string
   system?: string
+  attachments?: Attachment[]
 }
 
 export async function promptAsync(sessionID: string, input: PromptInput): Promise<void> {
+  const attachmentParts = (input.attachments ?? [])
+    .filter((a) => a && typeof a.url === "string" && a.url.length > 0)
+    .map((a, i) => ({
+      type: "file" as const,
+      url: a.url,
+      mime: a.mime ?? inferMimeFromUrl(a.url) ?? "application/octet-stream",
+      filename: a.filename ?? `attachment-${i + 1}${extFromMime(a.mime ?? inferMimeFromUrl(a.url) ?? "") ?? ""}`,
+    }))
+
   const body = {
     agent: input.agent,
     model: input.model
@@ -118,7 +165,7 @@ export async function promptAsync(sessionID: string, input: PromptInput): Promis
       : undefined,
     variant: input.variant,
     system: input.system,
-    parts: [{ type: "text", text: input.prompt }],
+    parts: [...attachmentParts, { type: "text", text: input.prompt }],
   }
   const res = await fetch(`${BASE}/session/${sessionID}/prompt_async`, {
     method: "POST",

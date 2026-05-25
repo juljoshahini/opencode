@@ -1,0 +1,9 @@
+Fetch a URL through a headless browser, waiting for JavaScript to execute, and return the fully-rendered text/markdown content.
+
+Use this tool instead of webfetch when:
+- The page is a Single Page App (Stripe, Linear, Vercel, modern React/Vue/Svelte landings) — webfetch returns near-empty HTML because the real content is rendered client-side.
+- You need the page's actual rendered copy/text (headlines, body, CTAs) for content inspiration, not the visual design.
+
+If you need visual design info (layout, colors, typography), use url_screenshot. If the page is simple/static and webfetch already works, prefer webfetch — it's lighter than this.
+
+Returns the rendered page as markdown (default) or text/html, ready to read as inspiration. Use it when the user attaches a URL and says "use this content as inspiration" or "match the copy/tone of this page".

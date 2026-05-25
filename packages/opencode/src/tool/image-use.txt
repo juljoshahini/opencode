@@ -1,0 +1,12 @@
+Download an image from a public URL, save it to /workspace, and make it usable in the generated HTML/CSS.
+
+Use this tool when the user wants to USE a specific image inside the page — e.g. "use this logo: https://...", "use this hero image: https://...", "put this photo in the testimonials section: https://...". The image gets saved to the workspace and synced to R2 so it becomes a real, browser-loadable asset.
+
+After this tool returns:
+- The image is on disk at /workspace/<filename>.
+- A public R2 URL is returned that you can use directly in HTML: <img src="<publicUrl>">.
+- The image is also returned as a multimodal attachment so you can confirm what was downloaded.
+
+Reference the returned publicUrl (not the original URL) in HTML — the original may be temporary, behind authentication, or have CORS restrictions.
+
+If the user just wants to LOOK at an image for design inspiration (not embed it in the page), use image_view instead — that does not save anything to the workspace.

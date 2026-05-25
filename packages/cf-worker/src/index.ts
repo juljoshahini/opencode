@@ -15,12 +15,12 @@ app.get("/", (c) =>
     name: "opencode-cf",
     purpose: "static landing-page generation via opencode",
     routes: {
-      "POST /sessions": "create session",
+      "POST /sessions": "create session — optional body: { apiKey?: \"sk-or-...\" } pins a per-session OpenRouter key (BYOK)",
       "PUT /sessions/:id/files/*path": "upload file (raw bytes)",
       "GET /sessions/:id/files": "list files",
       "GET /sessions/:id/files/*path": "read file",
       "DELETE /sessions/:id/files/*path": "delete file",
-      "POST /sessions/:id/prompt": "run a prompt (SSE) — body: { prompt, agent?, model?, title?, system? }",
+      "POST /sessions/:id/prompt": "run a prompt (SSE) — body: { prompt, agent?, model?, title?, system?, attachments?: [{url, mime?, filename?}] }",
       "DELETE /sessions/:id": "tear down session",
     },
   }),
@@ -32,9 +32,22 @@ function randomId(): string {
   return crypto.randomUUID().replace(/-/g, "")
 }
 
-app.post("/sessions", (c) => {
+app.post("/sessions", async (c) => {
   const id = randomId()
-  return c.json({ id })
+  let body: { apiKey?: string } = {}
+  try {
+    const ct = c.req.header("content-type") ?? ""
+    if (ct.includes("application/json")) body = (await c.req.json()) as { apiKey?: string }
+  } catch {}
+  if (body.apiKey && typeof body.apiKey === "string") {
+    const stub = c.env.SESSIONS.get(c.env.SESSIONS.idFromName(id))
+    await stub.fetch("http://do/__do/set-byok", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ apiKey: body.apiKey }),
+    })
+  }
+  return c.json({ id, byok: Boolean(body.apiKey) })
 })
 
 app.put("/sessions/:id/files/:path{.+}", async (c) => {

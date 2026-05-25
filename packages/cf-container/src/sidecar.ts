@@ -104,6 +104,7 @@ type PromptBody = {
   permission?: unknown
   system?: string
   priorTranscript?: Opencode.Turn[]
+  attachments?: Opencode.Attachment[]
 }
 
 function renderTranscript(turns: Opencode.Turn[]): string {
@@ -169,6 +170,7 @@ async function handlePrompt(req: Request): Promise<Response> {
     agent: body.agent ?? null,
     model: body.model ? `${body.model.providerID}/${body.model.id}` : null,
     hasPriorTranscript: Boolean(body.priorTranscript?.length),
+    attachments: body.attachments?.length ?? 0,
   })
 
   const defaultPermissions = [
@@ -229,12 +231,13 @@ ${renderTranscript(body.priorTranscript)}`
       const decoder = new TextDecoder()
       let buffer = ""
 
-      const defaultModel = { providerID: "anthropic", id: "claude-opus-4-7" }
+      const defaultModel = { providerID: "openrouter", id: "anthropic/claude-opus-4-7" }
       const promptPromise = Opencode.promptAsync(sessionID, {
         prompt: body.prompt,
         agent: body.agent,
         model: body.model ?? defaultModel,
         system: systemPrompt,
+        attachments: body.attachments,
       })
         .then(() => log.info("prompt.async.submitted", { runId, opencodeSessionId: sessionID }))
         .catch(async (e) => {

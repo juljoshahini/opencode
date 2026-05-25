@@ -42,6 +42,15 @@ export class OpenCodeSession extends Container<Env> {
       await this.syncToR2()
       return Response.json({ ok: true })
     }
+    if (path === "/__do/set-byok" && req.method === "POST") {
+      const body = (await req.json().catch(() => ({}))) as { apiKey?: string }
+      if (typeof body.apiKey === "string" && body.apiKey.trim()) {
+        await this.ctx.storage.put("byokOpenRouterKey", body.apiKey.trim())
+        logger.info("byok.set", { sessionId: this.sessionId })
+        return Response.json({ ok: true, stored: true })
+      }
+      return Response.json({ ok: true, stored: false })
+    }
     return new Response("not found", { status: 404 })
   }
 
@@ -61,9 +70,13 @@ export class OpenCodeSession extends Container<Env> {
 
     const rawBody = await req.text()
 
+    const byok = await this.ctx.storage.get<string>("byokOpenRouterKey")
+    if (byok) this.envVars.OPENROUTER_API_KEY = byok
+    else if (this.env.OPENROUTER_API_KEY) this.envVars.OPENROUTER_API_KEY = this.env.OPENROUTER_API_KEY
+
     const tBootStart = Date.now()
     await this.startAndWaitForPorts(8080)
-    logger.info("container.ready", { runId, sessionId, msToReady: Date.now() - tBootStart })
+    logger.info("container.ready", { runId, sessionId, msToReady: Date.now() - tBootStart, byok: Boolean(byok) })
 
     const tSyncIn = Date.now()
     const syncedIn = await this.syncFromR2()
@@ -272,6 +285,7 @@ export class OpenCodeSession extends Container<Env> {
       await this.stop()
     } catch {}
     await this.ctx.storage.delete("opencodeSessionId")
+    await this.ctx.storage.delete("byokOpenRouterKey")
     await this.env.FILES.delete(historyKeyFor(this.sessionId)).catch(() => {})
     const prefix = r2PrefixFor(this.sessionId)
     let cursor: string | undefined

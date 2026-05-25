@@ -14,6 +14,8 @@ export interface Env {
   GOOGLE_GENERATIVE_AI_API_KEY?: string
   IMAGE_GEN_MODEL?: string
   R2_PUBLIC_BASE?: string
+  CF_API_TOKEN?: string
+  CF_ACCOUNT_ID?: string
 }
 
 export const PROVIDER_VARS = [
@@ -23,6 +25,8 @@ export const PROVIDER_VARS = [
   "GOOGLE_GENERATIVE_AI_API_KEY",
   "IMAGE_GEN_MODEL",
   "R2_PUBLIC_BASE",
+  "CF_API_TOKEN",
+  "CF_ACCOUNT_ID",
 ] as const
 
 export function r2PrefixFor(sessionId: string): string {

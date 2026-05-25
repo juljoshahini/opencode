@@ -1,0 +1,7 @@
+Download an image from a public URL purely so you can SEE it. The image is NOT saved to the workspace.
+
+Use this tool when the user wants you to look at a reference image for design inspiration — e.g. "match the style of this: https://...", "mimic this design: https://...", "copy the look of: https://...". You receive the image as a multimodal attachment so you can examine layout, colors, typography, mood, and produce HTML/CSS that matches.
+
+Do NOT use this tool if the user wants the image to actually appear in the page — use image_use for that, which downloads and stores the image so you can reference it from HTML.
+
+After examining the attached image, design and write the matching HTML/CSS yourself. The image itself never appears in the final workspace.

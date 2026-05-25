@@ -1,0 +1,7 @@
+Take a screenshot of a fully-rendered web page (after JavaScript executes) so you can see what it visually looks like. The screenshot is NOT saved to /workspace — it is reference-only.
+
+Use this tool when the user wants you to look at the visual design of a live URL — e.g. "copy the design of https://stripe.com", "make my page look like https://linear.app", "match the aesthetic of https://...". Reading raw HTML (via webfetch or url_render) doesn't capture visuals. This tool gives you the rendered page as an image so you can examine layout, color palette, typography, spacing, and visual hierarchy.
+
+After examining the screenshot, write HTML/CSS that matches the design. The screenshot itself never appears in the final workspace.
+
+If the user wants raw page CONTENT (text, copy, structure) — not the visual design — use url_render or webfetch instead.
