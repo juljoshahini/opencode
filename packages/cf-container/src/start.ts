@@ -44,13 +44,16 @@ opencode.on("exit", (code, signal) => {
 process.on("SIGTERM", () => shutdown(0))
 process.on("SIGINT", () => shutdown(0))
 
-try {
-  await Opencode.ready(60_000)
-  console.log("opencode ready")
-} catch (e) {
-  console.error("opencode failed to start:", e)
-  shutdown(1)
-}
-
+// Start sidecar FIRST so the externally-exposed port (8080) is bound
+// immediately. Cloudflare Containers gates the container as "not listening"
+// until that port is open, and the merged opencode binary can take longer
+// than CF's startup probe to reach HTTP-ready. The sidecar's handlers will
+// surface a clear error if opencode isn't up yet for a given request.
 console.log("starting sidecar")
 await import("./sidecar")
+
+// Kick off the opencode readiness probe in the background. The sidecar's
+// request handlers gate on Opencode.awaitReady() so they hold the request
+// for up to ~30s while opencode warms up, rather than failing fast on a
+// connection refused (which surfaced as a Bun error overlay to the client).
+Opencode.startReadiness(120_000)

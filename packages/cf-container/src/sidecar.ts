@@ -4,6 +4,7 @@ import crypto from "node:crypto"
 import { WORKSPACE, resolveSafe, relTo, PathError } from "./paths"
 import * as Opencode from "./opencode"
 import { log, setBase } from "./log"
+import { preprocessAttachments } from "./image-preprocess"
 
 setBase({ workerSessionId: process.env.WORKER_SESSION_ID ?? null })
 
@@ -232,12 +233,13 @@ ${renderTranscript(body.priorTranscript)}`
       let buffer = ""
 
       const defaultModel = { providerID: "openrouter", id: "anthropic/claude-opus-4-7" }
+      const resizedAttachments = await preprocessAttachments(body.attachments)
       const promptPromise = Opencode.promptAsync(sessionID, {
         prompt: body.prompt,
         agent: body.agent,
         model: body.model ?? defaultModel,
         system: systemPrompt,
-        attachments: body.attachments,
+        attachments: resizedAttachments,
       })
         .then(() => log.info("prompt.async.submitted", { runId, opencodeSessionId: sessionID }))
         .catch(async (e) => {
@@ -414,6 +416,18 @@ const server = Bun.serve({
     }
 
     if (!checkAuth(req)) return unauthorized()
+
+    // Hold the request until opencode is HTTP-ready. On cold-start the binary
+    // takes longer than CF's container probe (we bind 8080 first so CF is
+    // happy), so requests can arrive before opencode listens on 127.0.0.1:4096.
+    // 90s tolerates CF's 0.5 vCPU Firecracker startup for the heavier merged
+    // binary; locally the binary is ready in ~3s.
+    try {
+      await Opencode.awaitReady(90_000)
+    } catch (e) {
+      log.warn("opencode.not-ready", { path: url.pathname, error: String(e) })
+      return json({ error: "opencode is warming up, retry in a few seconds" }, 503)
+    }
 
     if (url.pathname === "/list" && req.method === "GET") {
       return json({ files: await listFiles(WORKSPACE) })

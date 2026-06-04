@@ -35,6 +35,28 @@ export async function ready(timeoutMs = 30_000): Promise<void> {
   throw new Error(`opencode not ready: ${String(lastError)}`)
 }
 
+// Background readiness — set by the supervisor (start.ts) so sidecar handlers
+// can await opencode coming up instead of failing fast on a connection refused.
+let resolveReady: () => void
+let rejectReady: (e: unknown) => void
+let readyPromise: Promise<void> = new Promise((res, rej) => {
+  resolveReady = res
+  rejectReady = rej
+})
+
+export function startReadiness(timeoutMs = 120_000): void {
+  ready(timeoutMs).then(resolveReady, rejectReady)
+}
+
+export function awaitReady(timeoutMs = 30_000): Promise<void> {
+  return Promise.race([
+    readyPromise,
+    new Promise<never>((_, rej) =>
+      setTimeout(() => rej(new Error(`opencode not ready within ${timeoutMs}ms`)), timeoutMs),
+    ),
+  ])
+}
+
 export type CreateSessionInput = {
   title?: string
   agent?: string

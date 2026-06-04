@@ -4,15 +4,13 @@ import { Effect } from "effect"
 import { PluginV2 } from "../plugin"
 import { AbsolutePath } from "../schema"
 import { SkillV2 } from "../skill"
+import content from "./skill/customize-opencode.md" with { type: "text" }
 
 export const Plugin = PluginV2.define({
   id: PluginV2.ID.make("skill"),
   effect: Effect.gen(function* () {
     const skill = yield* SkillV2.Service
     const transform = yield* skill.transform()
-    const content = yield* Effect.promise(() =>
-      Bun.file(new URL("./skill/customize-opencode.md", import.meta.url)).text(),
-    )
 
     yield* transform((editor) => {
       editor.source(

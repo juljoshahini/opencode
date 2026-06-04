@@ -4,10 +4,11 @@ import { win32DisableProcessedInput, win32InstallCtrlCGuard } from "./win32"
 import { errorMessage } from "@/util/error"
 import { validateSession } from "./validate-session"
 import { ServerAuth } from "@/server/auth"
+import { BRAND } from "@/brand"
 
 export const AttachCommand = cmd({
   command: "attach <url>",
-  describe: "attach to a running opencode server",
+  describe: `attach to a running ${BRAND} server`,
   builder: (yargs) =>
     yargs
       .positional("url", {
