@@ -1,4 +1,6 @@
-import type { Effect } from "effect"
+import type { Duration, Effect } from "effect"
+import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
 import type { Config } from "../../../src/config/config"
 import type { Project } from "../../../src/project/project"
 import type { Worktree } from "../../../src/worktree"
@@ -10,20 +12,24 @@ export const Methods = ["GET", "POST", "PUT", "DELETE", "PATCH"] as const
 
 export type Method = (typeof Methods)[number]
 export type OpenApiMethod = (typeof OpenApiMethods)[number]
-export type Mode = "effect" | "parity" | "coverage" | "auth"
-export type Backend = "effect" | "legacy"
+export type Mode = "effect" | "coverage" | "auth"
 export type Comparison = "none" | "status" | "json"
 export type CaptureMode = "full" | "stream"
 export type AuthPolicy = "protected" | "public" | "public-bypass" | "ticket-bypass"
-export type ProjectOptions = { git?: boolean; config?: Partial<Config.Info>; llm?: boolean }
+export type ProjectOptions = { git?: boolean; config?: Partial<ConfigV1.Info>; llm?: boolean }
 export type OpenApiSpec = { paths?: Record<string, Partial<Record<OpenApiMethod, unknown>>> }
 export type JsonObject = Record<string, unknown>
 
 export type Options = {
   mode: Mode
   include: string | undefined
+  startAt: string | undefined
+  stopAt: string | undefined
   failOnMissing: boolean
   failOnSkip: boolean
+  scenarioTimeout: Duration.Duration
+  progress: boolean
+  trace: boolean
 }
 
 export type RequestSpec = {
@@ -37,6 +43,7 @@ export type CallResult = {
   contentType: string
   body: unknown
   text: string
+  timedOut: boolean
 }
 
 export type BackendApp = {
@@ -52,7 +59,7 @@ export type ScenarioContext = {
   sessionGet: (sessionID: SessionID) => Effect.Effect<SessionInfo | undefined>
   project: () => Effect.Effect<Project.Info>
   message: (sessionID: SessionID, input?: { text?: string }) => Effect.Effect<MessageSeed>
-  messages: (sessionID: SessionID) => Effect.Effect<MessageV2.WithParts[]>
+  messages: (sessionID: SessionID) => Effect.Effect<SessionV1.WithParts[]>
   todos: (sessionID: SessionID, todos: TodoInfo[]) => Effect.Effect<void>
   worktree: (input?: { name?: string }) => Effect.Effect<Worktree.Info>
   worktreeRemove: (directory: string) => Effect.Effect<void>
@@ -75,6 +82,7 @@ export type ActiveScenario = {
   project: ProjectOptions | undefined
   seed: (ctx: ScenarioContext) => Effect.Effect<unknown>
   request: (ctx: ScenarioContext, state: unknown) => RequestSpec
+  authProbe: RequestSpec | undefined
   expect: (ctx: ScenarioContext, state: unknown, result: CallResult) => Effect.Effect<void>
   compare: Comparison
   capture: CaptureMode
@@ -90,6 +98,7 @@ export type BuilderState<S> = {
   project: ProjectOptions | undefined
   seed: (ctx: ScenarioContext) => Effect.Effect<S>
   request: (ctx: SeededContext<S>) => RequestSpec
+  authProbe: RequestSpec | undefined
   capture: CaptureMode
   mutates: boolean
   reset: boolean
@@ -111,4 +120,4 @@ export type Result =
 
 export type SessionInfo = { id: SessionID; title: string; parentID?: SessionID }
 export type TodoInfo = { content: string; status: string; priority: string }
-export type MessageSeed = { info: MessageV2.User; part: MessageV2.TextPart }
+export type MessageSeed = { info: SessionV1.User; part: SessionV1.TextPart }
