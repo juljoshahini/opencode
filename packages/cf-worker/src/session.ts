@@ -367,7 +367,14 @@ export class OpenCodeSession extends Container<Env> {
         const key = `${prefix}${rel}`
         seen.add(key)
         const body = await fileRes.arrayBuffer()
-        await this.env.FILES.put(key, body)
+        // Forward the container's Content-Type (Bun.file infers from extension)
+        // so SVGs, HTML, CSS, JS, images etc. are served with the right MIME
+        // when fetched from R2 via a public URL. Without this, browsers render
+        // SVGs as text and treat HTML as application/octet-stream.
+        const contentType = fileRes.headers.get("content-type") ?? "application/octet-stream"
+        await this.env.FILES.put(key, body, {
+          httpMetadata: { contentType: contentType.split(";")[0].trim() },
+        })
       }),
     )
 

@@ -10,8 +10,13 @@ The image is returned as an attachment so it can be referenced or saved with the
 
 Inputs:
 - prompt (required): Vivid, specific description of the image. Include subject, style, lighting, composition.
+- model (optional): OpenRouter model slug. Defaults to "google/gemini-3.1-flash-image-preview". Pass an override when the user explicitly names a model — examples: "openai/gpt-5.4-image-2", "google/gemini-3.1-flash-image-preview". If the user says something like "use OpenAI for the images" or "try the new gpt-image-2 model", pass that slug here instead of the default.
 - size: "1024x1024" (square), "1024x1536" (portrait), "1536x1024" (landscape), or "auto". Default: auto.
 - quality: "low", "medium", "high", or "auto". Default: medium.
 - n: Number of images, 1-4. Default: 1.
 
-Do not call this tool unless the user has clearly asked for a generated image. For finding existing images on the web, use webfetch instead.
+Call this tool proactively when a landing page or UI needs visual content — you don't have to wait for the user to ask. Hero sections, product showcases, testimonials, team photos, feature illustrations, and other prominent visuals should be generated rather than left as `<img src="placeholder.png">` or stock CDN URLs. Default to using this tool whenever you write HTML that references an image asset you don't already have.
+
+Cost management: keep total generated images per page reasonable (typically 4-8). Reuse the same generated image where it makes sense (e.g., a hero image), rather than generating a fresh one for every <img> tag.
+
+For existing images on the web, use image_use (downloads + saves) or image_view (reference-only inspection).

@@ -21,6 +21,10 @@ export const Parameters = Schema.Struct({
   prompt: Schema.String.annotate({
     description: "Vivid, specific description of the image to generate (subject, style, lighting, composition).",
   }),
+  model: Schema.optional(Schema.String).annotate({
+    description:
+      "OpenRouter model slug for image generation (e.g. 'google/gemini-3.1-flash-image-preview', 'openai/gpt-5.4-image-2'). Omit to use the default. Override when the user asks for a specific model.",
+  }),
 })
 
 export const ImageGenTool = Tool.define(
@@ -34,7 +38,9 @@ export const ImageGenTool = Tool.define(
       execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
         Effect.gen(function* () {
           const apiKey = process.env["OPENROUTER_API_KEY"]
-          const model = process.env["IMAGE_GEN_MODEL"] ?? DEFAULT_MODEL
+          // Per-call model wins over the env-var default; lets the user say
+          // "use openai/gpt-5.4-image-2" in their prompt without redeploying.
+          const model = params.model?.trim() || process.env["IMAGE_GEN_MODEL"] || DEFAULT_MODEL
           const sessionId = process.env["WORKER_SESSION_ID"]
           const publicBase = process.env["R2_PUBLIC_BASE"]
           const workspace = process.env["WORKSPACE_DIR"] ?? process.cwd()

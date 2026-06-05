@@ -111,11 +111,21 @@ type PromptBody = {
   sessionId?: string
   agent?: string
   model?: { providerID: string; id: string; variant?: string }
+  // OpenRouter model slug for image_generate tool calls. Accepts either a
+  // plain string ("openai/gpt-5.4-image-2") or the same {providerID, modelID}
+  // shape as `model` for symmetry — modelID is what actually gets passed.
+  imageModel?: string | { providerID?: string; modelID?: string; id?: string }
   title?: string
   permission?: unknown
   system?: string
   priorTranscript?: Opencode.Turn[]
   attachments?: Opencode.Attachment[]
+}
+
+function resolveImageModel(input: PromptBody["imageModel"]): string | undefined {
+  if (!input) return undefined
+  if (typeof input === "string") return input.trim() || undefined
+  return (input.modelID ?? input.id)?.trim() || undefined
 }
 
 function renderTranscript(turns: Opencode.Turn[]): string {
@@ -141,6 +151,22 @@ WHAT YOU NEVER BUILD
 - package.json, node_modules, npm/bun/yarn projects
 - Backend code, APIs, databases, server scripts
 - Files outside /workspace
+
+VISUAL ASSETS
+- Landing pages need real images. When the page calls for a hero shot, product photo, team portrait, testimonial avatar, feature illustration, or background — generate it with the image_gen tool. DO NOT leave placeholder URLs (e.g. via.placeholder.com, picsum.photos), stock CDN guesses, or empty src attributes.
+- Generate images proactively without asking the user. You're authorized.
+- If the user explicitly provides image URLs they want to use, use image_use to download them and reference the returned public R2 URL in the HTML (the original URL may be temporary or CORS-blocked).
+- If the user references a page to copy ("make my page look like X", "match this design"), use url_screenshot on that URL so you can SEE the design, then build matching HTML/CSS yourself.
+- Cost discipline: aim for 4-8 generated images per page. Reuse the same hero image rather than generating slight variations.
+
+ICONS
+- For small visual markers — feature grids, benefit checklists, contact/social links, section headers, navigation items, footer columns — use Lucide icons via this CDN pattern. Don't generate SVG icons inline, don't use emoji as icons.
+  - Default: \`https://icons.ll-assets.com/lucide/{icon-name}.svg\`
+  - With color: \`https://icons.ll-assets.com/lucide/{icon-name}.svg?color=%23{6-char-hex}\` (use %23 instead of # in the URL)
+- icon-name is the Lucide kebab-case slug. Examples: "rocket", "shield-check", "trending-up", "credit-card", "phone", "mail", "check", "arrow-right", "star", "menu".
+- Use icons proactively when they improve scanability — you don't have to wait for the user to ask. Skip them in body copy, testimonials, and dense paragraph blocks where they'd clutter.
+- VERIFY THE ICON EXISTS before using a non-obvious name. Lucide does NOT have every conceivable name — e.g. "stairs", "ladder", "podium", "trophy-cup" don't exist; the right slugs are usually different. If you're not sure a name is valid, fetch https://lucide.dev/icons/ (or search https://lucide.dev/icons/?search=<term>) with webfetch and pick the closest real slug. When in doubt, prefer common, generic icons over creative ones — a broken icon URL is worse than a slightly less specific icon.
+- Example HTML: \`<img src="https://icons.ll-assets.com/lucide/rocket.svg?color=%23FF6B35" alt="" class="icon">\` — keep them small (16-32px), give a sensible CSS class so size/spacing is consistent across the page.
 
 OUTPUT REQUIREMENTS
 - Modern, clean, accessible, mobile-responsive markup
@@ -224,6 +250,17 @@ async function handlePrompt(req: Request): Promise<Response> {
   }
 
   let systemPrompt = body.system ?? LANDING_PAGE_SYSTEM
+
+  const imageModel = resolveImageModel(body.imageModel)
+  if (imageModel) {
+    // Inject as a hard instruction so the agent passes this exact model on
+    // every image_generate call instead of falling back to the tool default.
+    systemPrompt = `${systemPrompt}
+
+## IMAGE MODEL OVERRIDE
+When you call the image_generate tool, you MUST pass model: "${imageModel}" in the arguments. Do not use the default; do not pick a different model. This override applies to every image_generate call in this request.`
+  }
+
   if (isNewSession && body.priorTranscript && body.priorTranscript.length > 0) {
     systemPrompt = `${systemPrompt}
 
@@ -592,3 +629,4 @@ const shutdown = () => {
 }
 process.on("SIGTERM", shutdown)
 process.on("SIGINT", shutdown)
+// build-bust: 2026-06-05T15:32:55Z
