@@ -77,7 +77,10 @@ type RawMessage = {
 }
 
 export async function fetchTranscript(sessionID: string): Promise<Turn[]> {
-  const res = await fetch(`${BASE}/session/${sessionID}/messages`, { headers: headers() })
+  // opencode's list-messages route is singular: /session/:id/message (not /messages).
+  // The plural form 404s, fetchTranscript returns [], saveTranscript silently skips,
+  // and no transcript ever lands in R2.
+  const res = await fetch(`${BASE}/session/${sessionID}/message`, { headers: headers() })
   if (!res.ok) {
     if (res.status === 404) return []
     throw new Error(`fetch messages failed: ${res.status}`)

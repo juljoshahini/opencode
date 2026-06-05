@@ -46,16 +46,22 @@ export const UrlScreenshotTool = Tool.define(
             metadata: { url: params.url },
           })
 
+          // Cap viewport.width and force deviceScaleFactor 0.5 so a fullPage
+          // capture of a long landing page (often 10000-15000 CSS px tall)
+          // stays under Anthropic's 8000-pixel image-dimension limit. JPEG
+          // q75 keeps the base64 payload well under 5 MB for the same reason.
           const endpoint = `https://api.cloudflare.com/client/v4/accounts/${accountId}/browser-rendering/screenshot`
           const body = {
             url: params.url,
             viewport: {
-              width: params.viewportWidth ?? 1280,
+              width: Math.min(params.viewportWidth ?? 1280, 1280),
               height: params.viewportHeight ?? 800,
+              deviceScaleFactor: 0.5,
             },
             screenshotOptions: {
               fullPage: params.fullPage ?? false,
-              type: "png",
+              type: "jpeg",
+              quality: 75,
             },
             gotoOptions: { waitUntil: "networkidle0", timeout: 30_000 },
           }

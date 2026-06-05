@@ -34,5 +34,12 @@ export function r2PrefixFor(sessionId: string): string {
 }
 
 export function historyKeyFor(sessionId: string): string {
-  return `_system/sessions/${sessionId}/transcript.json`
+  return `transcripts/${sessionId}.json`
+}
+
+// Full opencode SQLite bundle (db + WAL + SHM, base64'd) for the session.
+// Lets us hand back to opencode the exact state it had before container sleep,
+// including tool history and compaction metadata.
+export function stateKeyFor(sessionId: string): string {
+  return `state/${sessionId}.json`
 }

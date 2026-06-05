@@ -46,6 +46,10 @@ COPY packages/cf-container/package.json ./package.json
 COPY packages/cf-container/tsconfig.json ./tsconfig.json
 COPY packages/cf-container/src ./src
 
+# Sidecar deps (photon-node WASM for image resizing). --production skips devDeps,
+# --ignore-scripts skips native postinstalls we don't need for the HTTP sidecar.
+RUN bun install --production --ignore-scripts
+
 RUN mkdir -p /workspace
 ENV WORKSPACE_DIR=/workspace
 ENV OPENCODE_HOST=127.0.0.1

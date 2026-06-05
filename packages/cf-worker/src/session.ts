@@ -1,5 +1,5 @@
 import { Container } from "@cloudflare/containers"
-import { type Env, PROVIDER_VARS, historyKeyFor, r2PrefixFor } from "./env"
+import { type Env, PROVIDER_VARS, historyKeyFor, r2PrefixFor, stateKeyFor } from "./env"
 import { logger } from "./log"
 
 type Turn = { role: "user" | "assistant"; text: string; time?: number }
@@ -77,6 +77,21 @@ export class OpenCodeSession extends Container<Env> {
     const tBootStart = Date.now()
     await this.startAndWaitForPorts(8080)
     logger.info("container.ready", { runId, sessionId, msToReady: Date.now() - tBootStart, byok: Boolean(byok) })
+
+    // Push opencode's SQLite bundle into the container BEFORE opencode boots,
+    // then signal the supervisor to spawn opencode. start.ts blocks on
+    // /__state/start until we call it. This is what makes a cold-started
+    // container resume with the exact opencode state — tool history,
+    // compaction markers, everything — that the previous prompt ended with.
+    const tStateRestore = Date.now()
+    const stateRestored = await this.pushStateToContainer(runId)
+    await this.signalOpencodeStart(runId)
+    logger.info("state.restore", {
+      runId,
+      sessionId,
+      restored: stateRestored,
+      ms: Date.now() - tStateRestore,
+    })
 
     const tSyncIn = Date.now()
     const syncedIn = await this.syncFromR2()
@@ -158,6 +173,14 @@ export class OpenCodeSession extends Container<Env> {
       },
       cancel(reason) {
         reader.cancel(reason).catch(() => {})
+        // Client disconnected (Postman closes SSE early, browser tab closed,
+        // user hit cancel, etc.). Still persist whatever opencode produced so
+        // the next prompt has prior-conversation context. Without this hook,
+        // pull() never sees the upstream finish and the transcript is lost.
+        if (!sawDone && opencodeSessionForSync) {
+          sawDone = true
+          sessionState.ctx.waitUntil(sessionState.finalizeRun(opencodeSessionForSync).catch(() => {}))
+        }
       },
     })
 
@@ -174,14 +197,91 @@ export class OpenCodeSession extends Container<Env> {
 
   private async finalizeRun(opencodeSessionId: string | null): Promise<void> {
     const t = Date.now()
-    const results = await Promise.allSettled([this.syncToR2(), this.saveTranscript(opencodeSessionId)])
+    const results = await Promise.allSettled([
+      this.syncToR2(),
+      this.saveTranscript(opencodeSessionId),
+      this.pullStateFromContainer(),
+    ])
     logger.info("finalize.done", {
       sessionId: this.sessionId,
       opencodeSessionId,
       syncToR2: results[0].status,
       saveTranscript: results[1].status,
+      saveState: results[2].status,
       ms: Date.now() - t,
     })
+  }
+
+  // Fetch the opencode SQLite bundle from the sidecar and write it to R2.
+  // Runs alongside syncToR2 and saveTranscript so we capture both filesystem
+  // and DB state at the same checkpoint.
+  private async pullStateFromContainer(): Promise<void> {
+    const res = await this.containerFetch(
+      new Request("http://container/__state/dump", {
+        method: "GET",
+        headers: this.sidecarHeaders,
+      }),
+      8080,
+    )
+    if (!res.ok) {
+      logger.warn("state.dump.failed", { sessionId: this.sessionId, status: res.status })
+      return
+    }
+    const bundle = (await res.json()) as { db?: string; wal?: string; shm?: string }
+    if (!bundle.db && !bundle.wal && !bundle.shm) {
+      logger.info("state.dump.empty", { sessionId: this.sessionId })
+      return
+    }
+    await this.env.FILES.put(stateKeyFor(this.sessionId), JSON.stringify(bundle), {
+      httpMetadata: { contentType: "application/json" },
+    })
+    logger.info("state.saved", {
+      sessionId: this.sessionId,
+      db: bundle.db?.length ?? 0,
+      wal: bundle.wal?.length ?? 0,
+      shm: bundle.shm?.length ?? 0,
+    })
+  }
+
+  // Counterpart to pullStateFromContainer — read the saved bundle from R2 and
+  // push it into the container before opencode boots. Returns true if a saved
+  // state existed and was successfully restored.
+  private async pushStateToContainer(runId: string): Promise<boolean> {
+    const got = await this.env.FILES.get(stateKeyFor(this.sessionId))
+    if (!got) return false
+    let bundle: unknown
+    try {
+      bundle = await got.json()
+    } catch (error) {
+      logger.warn("state.bundle.invalid", { runId, sessionId: this.sessionId, error: String(error) })
+      return false
+    }
+    const res = await this.containerFetch(
+      new Request("http://container/__state/restore", {
+        method: "PUT",
+        headers: { ...this.sidecarHeaders, "content-type": "application/json" },
+        body: JSON.stringify(bundle),
+      }),
+      8080,
+    )
+    if (!res.ok) {
+      logger.warn("state.restore.failed", { runId, sessionId: this.sessionId, status: res.status })
+      return false
+    }
+    return true
+  }
+
+  private async signalOpencodeStart(runId: string): Promise<void> {
+    const res = await this.containerFetch(
+      new Request("http://container/__state/start", {
+        method: "POST",
+        headers: this.sidecarHeaders,
+      }),
+      8080,
+    )
+    if (!res.ok) {
+      logger.warn("state.start.failed", { runId, sessionId: this.sessionId, status: res.status })
+    }
   }
 
   private async loadTranscript(): Promise<Turn[] | null> {
@@ -287,6 +387,7 @@ export class OpenCodeSession extends Container<Env> {
     await this.ctx.storage.delete("opencodeSessionId")
     await this.ctx.storage.delete("byokOpenRouterKey")
     await this.env.FILES.delete(historyKeyFor(this.sessionId)).catch(() => {})
+    await this.env.FILES.delete(stateKeyFor(this.sessionId)).catch(() => {})
     const prefix = r2PrefixFor(this.sessionId)
     let cursor: string | undefined
     do {

@@ -1,6 +1,7 @@
 import path from "path"
 import { exec } from "child_process"
 import { Filesystem } from "@/util/filesystem"
+import { BRAND } from "@/brand"
 import * as prompts from "@clack/prompts"
 import { map, pipe, sortBy, values } from "remeda"
 import { Octokit } from "@octokit/rest"
@@ -576,7 +577,7 @@ export const GithubRunCommand = effectCmd({
           await Effect.runPromise(sessionShare.share(session.id))
           return session.id.slice(-8)
         })()
-        console.log("opencode session", session.id)
+        console.log(`${BRAND} session`, session.id)
 
         // Handle event types:
         // REPO_EVENTS (schedule, workflow_dispatch): no issue/PR context, output to logs/PR only
@@ -944,7 +945,7 @@ export const GithubRunCommand = effectCmd({
       }
 
       async function chat(message: string, files: PromptFiles = []) {
-        console.log("Sending message to opencode...")
+        console.log(`Sending message to ${BRAND}...`)
 
         return Effect.runPromise(
           Effect.gen(function* () {

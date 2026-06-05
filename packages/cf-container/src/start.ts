@@ -1,7 +1,16 @@
+// Container supervisor. New ordering:
+//   1. Start sidecar HTTP first (bind 8080) so CF's container probe passes and
+//      the worker can push a state bundle / workspace files before opencode
+//      has a chance to create an empty DB.
+//   2. Wait for an explicit spawn signal (POST /__state/start from the worker,
+//      or sidecar's auto-fallback if a non-state route hits first).
+//   3. Spawn opencode subprocess.
+//   4. Wait for opencode to be HTTP-ready, then we're done bootstrapping.
 import fs from "node:fs/promises"
 import { spawn, type ChildProcess } from "node:child_process"
 import { WORKSPACE } from "./paths"
 import * as Opencode from "./opencode"
+import { waitForSpawnSignal } from "./opencode-lifecycle"
 
 const OPENCODE_BIN = process.env.OPENCODE_BIN ?? "opencode"
 const OPENCODE_PORT = process.env.OPENCODE_PORT ?? "4096"
@@ -12,6 +21,12 @@ if (!process.env.OPENCODE_INTERNAL_URL) {
 }
 
 await fs.mkdir(WORKSPACE, { recursive: true })
+
+console.log("starting sidecar")
+await import("./sidecar")
+
+console.log("waiting for spawn signal")
+await waitForSpawnSignal()
 
 console.log(`booting opencode serve on ${OPENCODE_HOST}:${OPENCODE_PORT}`)
 const opencode: ChildProcess = spawn(
@@ -51,6 +66,3 @@ try {
   console.error("opencode failed to start:", e)
   shutdown(1)
 }
-
-console.log("starting sidecar")
-await import("./sidecar")

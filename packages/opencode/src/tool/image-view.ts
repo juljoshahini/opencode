@@ -3,7 +3,9 @@ import * as Tool from "./tool"
 import DESCRIPTION from "./image-view.txt"
 
 const DEFAULT_TIMEOUT = 60 * 1000
-const MAX_BYTES = 8 * 1024 * 1024
+// Cap raw bytes so the base64-expanded payload (~4/3x) stays under Anthropic's
+// 5 MB image limit with headroom.
+const MAX_BYTES = 3 * 1024 * 1024
 
 export const Parameters = Schema.Struct({
   url: Schema.String.annotate({

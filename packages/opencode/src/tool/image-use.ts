@@ -6,6 +6,10 @@ import * as Tool from "./tool"
 import DESCRIPTION from "./image-use.txt"
 
 const DEFAULT_TIMEOUT = 60 * 1000
+// Cap raw bytes so the base64-expanded attachment stays under Anthropic's
+// 5 MB image limit (base64 is ~4/3x raw). The file itself is still saved
+// to /workspace regardless — this only gates the inline attachment.
+const MAX_ATTACHMENT_BYTES = 3 * 1024 * 1024
 
 const MIME_TO_EXT: Record<string, string> = {
   "image/png": "png",
@@ -74,7 +78,8 @@ export const ImageUseTool = Tool.define(
               ? `${publicBase.replace(/\/+$/, "")}/sessions/${sessionId}/${filename}`
               : null
 
-          const dataUrl = `data:${contentType};base64,${bytes.toString("base64")}`
+          const tooLargeForInline = bytes.byteLength > MAX_ATTACHMENT_BYTES
+          const dataUrl = tooLargeForInline ? null : `data:${contentType};base64,${bytes.toString("base64")}`
 
           return {
             title: `Saved ${filename}`,
@@ -82,8 +87,13 @@ export const ImageUseTool = Tool.define(
               `Downloaded ${params.url} (${bytes.byteLength} bytes, ${contentType}).`,
               `Saved to /workspace/${filename}.`,
               publicUrl ? `Public URL (available after the prompt completes): ${publicUrl}` : `Local only as ${filename}.`,
+              tooLargeForInline
+                ? `(${bytes.byteLength} bytes exceeds the ${MAX_ATTACHMENT_BYTES}-byte inline limit, not attached.)`
+                : null,
               `Use this in HTML: <img src="${publicUrl ?? `./${filename}`}" alt="...">.`,
-            ].join("\n"),
+            ]
+              .filter(Boolean)
+              .join("\n"),
             metadata: {
               url: params.url,
               filename,
@@ -92,7 +102,7 @@ export const ImageUseTool = Tool.define(
               mime: contentType,
               bytes: bytes.byteLength,
             },
-            attachments: [{ type: "file" as const, mime: contentType, url: dataUrl }],
+            attachments: dataUrl ? [{ type: "file" as const, mime: contentType, url: dataUrl }] : [],
           }
         }).pipe(Effect.orDie),
     }
