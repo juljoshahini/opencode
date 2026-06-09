@@ -17,7 +17,11 @@ COPY . .
 
 # Postinstall scripts are skipped — opencode's HTTP server doesn't need the
 # native node-pty / parcel watcher binaries that those scripts compile.
-RUN bun install --ignore-scripts
+# --frozen-lockfile makes bun trust bun.lock instead of re-resolving from
+# scratch, which avoids transient registry/resolver hiccups on packages we
+# don't actually need at runtime (e.g. storybook in the @opencode-ai/storybook
+# workspace).
+RUN bun install --frozen-lockfile --ignore-scripts
 
 # OPENCODE_CHANNEL bypasses the build's `git branch` query (no .git in context).
 # OPENCODE_VERSION pins the binary version string so we don't depend on npm.
