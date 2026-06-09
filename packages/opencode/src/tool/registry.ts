@@ -1,7 +1,10 @@
 import { PlanExitTool } from "./plan"
 import { Session } from "@/session/session"
 import { QuestionTool } from "./question"
-import { ShellTool } from "./shell"
+// LanderLab: shell/bash tool unregistered — no shell use cases in static
+// landing-page generation. Re-enable by uncommenting this import and the
+// three other `// SHELL:` markers below.
+// import { ShellTool } from "./shell"
 import { EditTool } from "./edit"
 import { GlobTool } from "./glob"
 import { GrepTool } from "./grep"
@@ -15,6 +18,7 @@ import { ImageViewTool } from "./image-view"
 import { UrlScreenshotTool } from "./url-screenshot"
 import { UrlRenderTool } from "./url-render"
 import { WriteTool } from "./write"
+import { DeleteTool } from "./delete"
 import { InvalidTool } from "./invalid"
 import { SkillTool } from "./skill"
 import * as Tool from "./tool"
@@ -123,9 +127,10 @@ export const layer: Layer.Layer<
     const urlscreenshot = yield* UrlScreenshotTool
     const urlrender = yield* UrlRenderTool
     const websearch = yield* WebSearchTool
-    const shell = yield* ShellTool
+    // SHELL: const shell = yield* ShellTool
     const globtool = yield* GlobTool
     const writetool = yield* WriteTool
+    const deletetool = yield* DeleteTool
     const edit = yield* EditTool
     const greptool = yield* GrepTool
     const patchtool = yield* ApplyPatchTool
@@ -212,12 +217,13 @@ export const layer: Layer.Layer<
 
         const tool = yield* Effect.all({
           invalid: Tool.init(invalid),
-          shell: Tool.init(shell),
+          // SHELL: shell: Tool.init(shell),
           read: Tool.init(read),
           glob: Tool.init(globtool),
           grep: Tool.init(greptool),
           edit: Tool.init(edit),
           write: Tool.init(writetool),
+          delete: Tool.init(deletetool),
           task: Tool.init(task),
           fetch: Tool.init(webfetch),
           imagegen: Tool.init(imagegen),
@@ -239,12 +245,13 @@ export const layer: Layer.Layer<
           builtin: [
             tool.invalid,
             ...(questionEnabled ? [tool.question] : []),
-            tool.shell,
+            // SHELL: tool.shell,
             tool.read,
             tool.glob,
             tool.grep,
             tool.edit,
             tool.write,
+            tool.delete,
             tool.task,
             tool.fetch,
             tool.imagegen,

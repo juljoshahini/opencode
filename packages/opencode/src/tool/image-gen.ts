@@ -25,6 +25,10 @@ export const Parameters = Schema.Struct({
     description:
       "OpenRouter model slug for image generation (e.g. 'google/gemini-3.1-flash-image-preview', 'openai/gpt-5.4-image-2'). Omit to use the default. Override when the user asks for a specific model.",
   }),
+  image: Schema.optional(Schema.String).annotate({
+    description:
+      "Optional reference image to use as the visual starting point — the model will refine, restyle, or make variations of this image instead of generating from scratch. Must be an absolute http(s) URL (e.g. the publicUrl returned by a previous image_generate call, or any other public image URL). Workspace paths are NOT accepted — the model needs a publicly fetchable URL. Use when the user asks to 'change/refine/tweak/restyle/use the same image but...' or otherwise wants the new image to be derived from a prior one rather than fresh.",
+  }),
 })
 
 export const ImageGenTool = Tool.define(
@@ -53,13 +57,26 @@ export const ImageGenTool = Tool.define(
             permission: "image_generate",
             patterns: [params.prompt.slice(0, 80)],
             always: ["*"],
-            metadata: { prompt: params.prompt },
+            metadata: { prompt: params.prompt, refining: params.image ? true : false },
           })
+
+          if (params.image && !/^https?:\/\//i.test(params.image)) {
+            throw new Error(
+              `image must be an absolute http(s) URL (got: ${params.image.slice(0, 80)}). Workspace paths are not supported — pass the publicUrl from a previous image_generate call instead.`,
+            )
+          }
+
+          const userContent = params.image
+            ? [
+                { type: "text", text: params.prompt },
+                { type: "image_url", image_url: { url: params.image } },
+              ]
+            : params.prompt
 
           const url = "https://openrouter.ai/api/v1/chat/completions"
           const body = {
             model,
-            messages: [{ role: "user", content: params.prompt }],
+            messages: [{ role: "user", content: userContent }],
             modalities: ["image", "text"],
           }
 
@@ -125,6 +142,7 @@ export const ImageGenTool = Tool.define(
               publicUrl,
               mime,
               bytes: buf.byteLength,
+              refinedFrom: params.image ?? null,
             },
           }
         }).pipe(Effect.orDie),

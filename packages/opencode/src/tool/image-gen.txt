@@ -9,13 +9,13 @@ Use this tool whenever the user wants to:
 The image is returned as an attachment so it can be referenced or saved with the write tool.
 
 Inputs:
-- prompt (required): Vivid, specific description of the image. Include subject, style, lighting, composition.
+- prompt (required): Vivid, specific description of the image. Include subject, style, lighting, composition. When refining a prior image, describe ONLY the changes you want (e.g. "same composition, but warmer lighting and a sunset palette"), not the whole scene from scratch.
 - model (optional): OpenRouter model slug. Defaults to "google/gemini-3.1-flash-image-preview". Pass an override when the user explicitly names a model — examples: "openai/gpt-5.4-image-2", "google/gemini-3.1-flash-image-preview". If the user says something like "use OpenAI for the images" or "try the new gpt-image-2 model", pass that slug here instead of the default.
-- size: "1024x1024" (square), "1024x1536" (portrait), "1536x1024" (landscape), or "auto". Default: auto.
-- quality: "low", "medium", "high", or "auto". Default: medium.
-- n: Number of images, 1-4. Default: 1.
+- image (optional): Reference image to refine, restyle, or use as the visual starting point. MUST be an absolute http(s) URL — the model fetches it directly, so it has to be publicly reachable. Pass the publicUrl returned by a previous image_generate call, or any external public image URL. Workspace paths (e.g. "/workspace/abc.png") will NOT work. Use this whenever the user wants the new image to be derived from a prior one — for example: "tweak the hero", "make a darker version", "same image but with…", "refine that", "use the same illustration but…". When image is set, the model treats the prompt as instructions to apply to the reference rather than a fresh generation.
 
 Call this tool proactively when a landing page or UI needs visual content — you don't have to wait for the user to ask. Hero sections, product showcases, testimonials, team photos, feature illustrations, and other prominent visuals should be generated rather than left as `<img src="placeholder.png">` or stock CDN URLs. Default to using this tool whenever you write HTML that references an image asset you don't already have.
+
+Refinement workflow: when the user reacts to a previously generated image (negatively or with requested changes), call image_generate again with `image` set to that image's publicUrl from the prior turn. For multi-step refinement, pass the most recent generation's publicUrl each time.
 
 Cost management: keep total generated images per page reasonable (typically 4-8). Reuse the same generated image where it makes sense (e.g., a hero image), rather than generating a fresh one for every <img> tag.
 

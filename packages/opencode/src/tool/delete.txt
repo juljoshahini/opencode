@@ -1,0 +1,8 @@
+Deletes a single file from the local filesystem.
+
+Usage:
+- Use this tool when the user explicitly asks to delete or remove a file, or when a file you previously created is no longer needed.
+- This tool only deletes files, not directories. To remove a directory's contents, call this tool once per file inside it.
+- The path must be absolute.
+- This is irreversible — do not call this tool speculatively.
+- Do NOT use this tool to "clean up" files the user did not ask you to touch.
