@@ -18,6 +18,17 @@ const STATE_DB_SHM = `${STATE_DB}-shm`
 
 setBase({ workerSessionId: process.env.WORKER_SESSION_ID ?? null })
 
+// Process-wide tracking so any shutdown / crash log can attribute the reason
+// and how long the sidecar lived. Uptime in particular helps differentiate
+// "got SIGTERM after 60s of idle" (Cloudflare Containers sleepAfter) from
+// "agent crashed mid-turn after 30s" (real failure).
+const PROCESS_STARTED_AT = Date.now()
+let inFlightRequests = 0
+let lastRequestAt: number | null = null
+let lastRequestPath: string | null = null
+let activeOpencodeSession: string | null = null
+let activeRunStartedAt: number | null = null
+
 const PORT = Number(process.env.SIDECAR_PORT ?? 8080)
 const TOKEN = process.env.SIDECAR_TOKEN
 
@@ -279,6 +290,11 @@ ${renderTranscript(body.priorTranscript)}`
   const abort = new AbortController()
   req.signal.addEventListener("abort", () => abort.abort())
 
+  // Track this as the current active opencode run so shutdown / crash logs
+  // can report which session was in flight and how long it'd been running.
+  activeOpencodeSession = sessionID
+  activeRunStartedAt = Date.now()
+
   const work = (async () => {
     try {
       await sse(writer, "session", { id: sessionID })
@@ -445,6 +461,19 @@ ${renderTranscript(body.priorTranscript)}`
         await writer.close()
       } catch {}
       sessionMutex.delete(sessionID!)
+      // Clear active-run trackers ONLY if this is still the active run.
+      // (Defensive against overlapping runs that the mutex should prevent
+      // but log anomalies have been seen before.)
+      if (activeOpencodeSession === sessionID) {
+        log.info("run.end", {
+          runId,
+          opencodeSessionId: sessionID,
+          ms: Date.now() - (activeRunStartedAt ?? Date.now()),
+          clientAborted: req.signal.aborted,
+        })
+        activeOpencodeSession = null
+        activeRunStartedAt = null
+      }
     }
   })()
 
@@ -548,6 +577,61 @@ const server = Bun.serve({
       return json({ ok: true, workspace: WORKSPACE })
     }
 
+    // Track every non-health request so shutdown logs can report active work.
+    // /health is excluded because Cloudflare's container probe hits it
+    // continuously and would dominate the counter.
+    inFlightRequests++
+    lastRequestAt = Date.now()
+    lastRequestPath = url.pathname
+    const reqStartedAt = Date.now()
+    let respStatus = 0
+    let threwError: unknown = null
+    req.signal?.addEventListener?.(
+      "abort",
+      () => {
+        log.warn("request.aborted", {
+          path: url.pathname,
+          method: req.method,
+          msSinceStart: Date.now() - reqStartedAt,
+          inFlightRequests,
+          activeOpencodeSession,
+          activeRunMs: activeRunStartedAt ? Date.now() - activeRunStartedAt : null,
+        })
+      },
+      { once: true },
+    )
+    try {
+      const response = await handleRequest(req, url)
+      respStatus = response.status
+      return response
+    } catch (e) {
+      threwError = e
+      throw e
+    } finally {
+      inFlightRequests = Math.max(0, inFlightRequests - 1)
+      // Only log non-trivial requests (skip the dozens of __state pings)
+      // unless they errored.
+      const ms = Date.now() - reqStartedAt
+      const isStatePing = url.pathname.startsWith("/__state/") && respStatus === 200 && !threwError
+      if (!isStatePing) {
+        log.info("request.end", {
+          path: url.pathname,
+          method: req.method,
+          status: respStatus,
+          ms,
+          inFlightRequests,
+          errored: Boolean(threwError),
+          errorMessage: threwError ? String((threwError as any)?.message ?? threwError) : undefined,
+        })
+      }
+    }
+  },
+})
+
+// Extracted from the original Bun.serve fetch handler so we can wrap it with
+// uniform request-lifecycle logging above. Body is identical to what was
+// there before; only the entry/exit instrumentation is new.
+async function handleRequest(req: Request, url: URL): Promise<Response> {
     if (!checkAuth(req)) return unauthorized()
 
     // State control endpoints — worker uses these to push a saved DB bundle
@@ -617,16 +701,99 @@ const server = Bun.serve({
     }
 
     return err("not found", 404)
-  },
-})
+}
 
 log.info("sidecar.listen", { port: server.port, workspace: WORKSPACE })
 
-const shutdown = () => {
-  log.info("sidecar.shutdown")
-  server.stop()
-  process.exit(0)
+let shutdownReason: string | null = null
+let shuttingDown = false
+
+const shutdown = (reason: string, exitCode = 0) => {
+  if (shuttingDown) {
+    log.warn("sidecar.shutdown.duplicate", { reason, priorReason: shutdownReason })
+    return
+  }
+  shuttingDown = true
+  shutdownReason = reason
+  log.info("sidecar.shutdown", {
+    reason,
+    exitCode,
+    uptimeMs: Date.now() - PROCESS_STARTED_AT,
+    inFlightRequests,
+    lastRequestPath,
+    msSinceLastRequest: lastRequestAt ? Date.now() - lastRequestAt : null,
+    activeOpencodeSession,
+    activeRunMs: activeRunStartedAt ? Date.now() - activeRunStartedAt : null,
+    pendingMutexes: sessionMutex.size,
+  })
+  try {
+    server.stop()
+  } catch (e) {
+    log.error("sidecar.shutdown.serverStopFailed", { error: String(e) })
+  }
+  process.exit(exitCode)
 }
-process.on("SIGTERM", shutdown)
-process.on("SIGINT", shutdown)
+process.on("SIGTERM", () => shutdown("SIGTERM", 0))
+process.on("SIGINT", () => shutdown("SIGINT", 0))
+
+// Cloudflare Containers send SIGTERM when scaling down or after sleepAfter
+// elapses. SIGHUP shows up if the controlling tty closes — rare in containers
+// but log it anyway in case the runtime starts using it.
+process.on("SIGHUP", () => shutdown("SIGHUP", 0))
+
+// Without these handlers, a thrown promise rejection or sync exception in any
+// async path kills the process silently with no log line at all — which is
+// exactly the failure mode that produced the unexplained `sidecar.shutdown`
+// we saw in production. Now they'll surface with stack traces.
+process.on("uncaughtException", (err) => {
+  log.error("sidecar.uncaughtException", {
+    name: err?.name,
+    message: err?.message,
+    stack: err?.stack?.split("\n").slice(0, 8).join(" | "),
+    uptimeMs: Date.now() - PROCESS_STARTED_AT,
+    inFlightRequests,
+    lastRequestPath,
+    activeOpencodeSession,
+  })
+  // Don't try to keep going — corrupted state. Exit so the container restarts.
+  shutdown("uncaughtException", 1)
+})
+process.on("unhandledRejection", (reason) => {
+  const err = reason as { name?: string; message?: string; stack?: string } | undefined
+  log.error("sidecar.unhandledRejection", {
+    name: err?.name,
+    message: err?.message ?? String(reason),
+    stack: err?.stack?.split("\n").slice(0, 8).join(" | "),
+    uptimeMs: Date.now() - PROCESS_STARTED_AT,
+    inFlightRequests,
+    lastRequestPath,
+    activeOpencodeSession,
+  })
+  // Rejection alone shouldn't kill us — log and continue. If it cascades into
+  // a real error, the uncaughtException handler will catch it.
+})
+
+// `beforeExit` fires when the event loop has nothing to do — meaning every
+// open handle has closed naturally. If we get here without an explicit
+// shutdown call, the sidecar is dying due to "natural" idle, which is a bug
+// (the HTTP server should keep the loop alive).
+process.on("beforeExit", (code) => {
+  log.warn("sidecar.beforeExit", {
+    code,
+    shutdownReason,
+    uptimeMs: Date.now() - PROCESS_STARTED_AT,
+    inFlightRequests,
+  })
+})
+
+// Final terminator log. Fires once exit() is called or the loop naturally
+// ends. Should be the LAST thing in cf-worker tail before the container
+// disappears, giving us a definitive cause line.
+process.on("exit", (code) => {
+  log.info("sidecar.exit", {
+    code,
+    shutdownReason: shutdownReason ?? "unknown",
+    uptimeMs: Date.now() - PROCESS_STARTED_AT,
+  })
+})
 // build-bust: 2026-06-05T15:32:55Z
