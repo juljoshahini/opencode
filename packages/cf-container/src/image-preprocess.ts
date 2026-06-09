@@ -24,8 +24,8 @@ function loadPhoton(): Promise<Photon | null> {
 
 function inferMime(url: string): string | undefined {
   const m = url.match(/^data:([^;,]+)[;,]/)
-  if (m) return m[1].toLowerCase()
-  const ext = url.split("?")[0].split(".").pop()?.toLowerCase()
+  if (m) return m[1]?.toLowerCase()
+  const ext = url.split("?")[0]?.split(".").pop()?.toLowerCase()
   if (!ext) return undefined
   const map: Record<string, string> = {
     png: "image/png",
