@@ -12,7 +12,10 @@ export class OpenCodeSession extends Container<Env> {
   override envVars: Record<string, string> = {}
 
   constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env)
+    // Cast: newer @cloudflare/workers-types defaults DurableObjectState's
+    // generic to `unknown`, but @cloudflare/containers' Container<Env>
+    // expects `DurableObjectState<{}>`. Pure type-level fix.
+    super(ctx as DurableObjectState<{}>, env)
     this.envVars = {
       SIDECAR_TOKEN: env.SIDECAR_TOKEN,
       OPENCODE_SERVER_PASSWORD: env.OPENCODE_SERVER_PASSWORD,
