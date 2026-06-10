@@ -57,7 +57,10 @@ export const AuthMiddleware: MiddlewareHandler = (c, next) => {
 
 export function LoggerMiddleware(backendAttributes: ServerBackend.Attributes): MiddlewareHandler {
   return async (c, next) => {
-    const skip = c.req.path === "/log"
+    // /path is the readiness probe — the cf-container sidecar polls it every
+    // 250ms during boot and before every proxied request, which floods the
+    // request log with hundreds of identical lines per session.
+    const skip = c.req.path === "/log" || c.req.path === "/path"
     if (skip) return next()
     const attributes = {
       method: c.req.method,
