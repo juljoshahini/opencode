@@ -154,11 +154,43 @@ export class OpenCodeSession extends Container<Env> {
     const decoder = new TextDecoder()
     let textBuffer = ""
     let sawDone = false
+    let streamedBytes = 0
+    let streamedChunks = 0
+    const tStreamStart = Date.now()
 
     const stream = new ReadableStream<Uint8Array>({
       async pull(controller) {
-        const { value, done } = await reader.read()
+        let result: ReadableStreamReadResult<Uint8Array>
+        try {
+          result = await reader.read()
+        } catch (e) {
+          // Upstream (container) died mid-stream — without this log the only
+          // trace is a generic stream error on the consumer side.
+          logger.error("stream.pull.error", {
+            runId,
+            sessionId,
+            streamedBytes,
+            streamedChunks,
+            sawDone,
+            msSinceStreamStart: Date.now() - tStreamStart,
+            error: String(e),
+          })
+          if (!sawDone) {
+            sawDone = true
+            sessionState.ctx.waitUntil(sessionState.finalizeRun(opencodeSessionForSync).catch(() => {}))
+          }
+          throw e
+        }
+        const { value, done } = result
         if (done) {
+          logger.info("stream.close", {
+            runId,
+            sessionId,
+            streamedBytes,
+            streamedChunks,
+            sawDone,
+            ms: Date.now() - tStreamStart,
+          })
           if (!sawDone) {
             sessionState.ctx.waitUntil(sessionState.finalizeRun(opencodeSessionForSync).catch(() => {}))
             sawDone = true
@@ -167,19 +199,40 @@ export class OpenCodeSession extends Container<Env> {
           return
         }
         sessionState.renewActivityTimeout()
+        streamedBytes += value.byteLength
+        streamedChunks += 1
         controller.enqueue(value)
         textBuffer += decoder.decode(value, { stream: true })
         if (!sawDone && textBuffer.includes("event: done")) {
           sawDone = true
+          logger.info("stream.doneEvent", {
+            runId,
+            sessionId,
+            streamedBytes,
+            streamedChunks,
+            ms: Date.now() - tStreamStart,
+          })
           sessionState.ctx.waitUntil(sessionState.finalizeRun(opencodeSessionForSync).catch(() => {}))
         }
       },
       cancel(reason) {
+        // Client disconnected (browser tab closed, user hit stop, network
+        // dropped — e.g. the QUIC failures we've seen). This is the smoking
+        // gun that distinguishes "downstream gave up" from "container died":
+        // stream.cancel here = client-side abort; stream.pull.error = upstream.
+        logger.warn("stream.cancel", {
+          runId,
+          sessionId,
+          reason: reason ? String(reason) : "unknown",
+          streamedBytes,
+          streamedChunks,
+          sawDone,
+          ms: Date.now() - tStreamStart,
+        })
         reader.cancel(reason).catch(() => {})
-        // Client disconnected (Postman closes SSE early, browser tab closed,
-        // user hit cancel, etc.). Still persist whatever opencode produced so
-        // the next prompt has prior-conversation context. Without this hook,
-        // pull() never sees the upstream finish and the transcript is lost.
+        // Still persist whatever opencode produced so the next prompt has
+        // prior-conversation context. Without this hook, pull() never sees
+        // the upstream finish and the transcript is lost.
         if (!sawDone && opencodeSessionForSync) {
           sawDone = true
           sessionState.ctx.waitUntil(sessionState.finalizeRun(opencodeSessionForSync).catch(() => {}))
@@ -251,7 +304,10 @@ export class OpenCodeSession extends Container<Env> {
   // state existed and was successfully restored.
   private async pushStateToContainer(runId: string): Promise<boolean> {
     const got = await this.env.FILES.get(stateKeyFor(this.sessionId))
-    if (!got) return false
+    if (!got) {
+      logger.info("state.push.none", { runId, sessionId: this.sessionId })
+      return false
+    }
     let bundle: unknown
     try {
       bundle = await got.json()
@@ -259,6 +315,14 @@ export class OpenCodeSession extends Container<Env> {
       logger.warn("state.bundle.invalid", { runId, sessionId: this.sessionId, error: String(error) })
       return false
     }
+    const sizes = bundle as { db?: string; wal?: string; shm?: string }
+    logger.info("state.push.start", {
+      runId,
+      sessionId: this.sessionId,
+      db: sizes.db?.length ?? 0,
+      wal: sizes.wal?.length ?? 0,
+      shm: sizes.shm?.length ?? 0,
+    })
     const res = await this.containerFetch(
       new Request("http://container/__state/restore", {
         method: "PUT",
@@ -300,7 +364,10 @@ export class OpenCodeSession extends Container<Env> {
   }
 
   private async saveTranscript(opencodeSessionId: string | null): Promise<void> {
-    if (!opencodeSessionId) return
+    if (!opencodeSessionId) {
+      logger.warn("transcript.save.skipped", { sessionId: this.sessionId, reason: "no opencodeSessionId" })
+      return
+    }
     const res = await this.containerFetch(
       new Request(`http://container/transcript/${opencodeSessionId}`, {
         method: "GET",
@@ -308,12 +375,23 @@ export class OpenCodeSession extends Container<Env> {
       }),
       8080,
     )
-    if (!res.ok) return
+    if (!res.ok) {
+      logger.warn("transcript.save.fetchFailed", {
+        sessionId: this.sessionId,
+        opencodeSessionId,
+        status: res.status,
+      })
+      return
+    }
     const turns = (await res.json()) as Turn[]
-    if (!Array.isArray(turns) || turns.length === 0) return
+    if (!Array.isArray(turns) || turns.length === 0) {
+      logger.warn("transcript.save.empty", { sessionId: this.sessionId, opencodeSessionId })
+      return
+    }
     await this.env.FILES.put(historyKeyFor(this.sessionId), JSON.stringify(turns), {
       httpMetadata: { contentType: "application/json" },
     })
+    logger.info("transcript.saved", { sessionId: this.sessionId, opencodeSessionId, turns: turns.length })
   }
 
   private async syncFromR2(): Promise<number> {
@@ -345,6 +423,7 @@ export class OpenCodeSession extends Container<Env> {
   }
 
   private async syncToR2(): Promise<void> {
+    const t0 = Date.now()
     const prefix = r2PrefixFor(this.sessionId)
     const listRes = await this.containerFetch(
       new Request("http://container/list", {
@@ -353,9 +432,15 @@ export class OpenCodeSession extends Container<Env> {
       }),
       8080,
     )
-    if (!listRes.ok) return
+    if (!listRes.ok) {
+      logger.warn("r2.sync.out.listFailed", { sessionId: this.sessionId, status: listRes.status })
+      return
+    }
     const { files } = (await listRes.json()) as { files: string[] }
 
+    let uploaded = 0
+    let uploadedBytes = 0
+    let fetchFailed = 0
     const seen = new Set<string>()
     await Promise.all(
       files.map(async (rel) => {
@@ -366,7 +451,10 @@ export class OpenCodeSession extends Container<Env> {
           }),
           8080,
         )
-        if (!fileRes.ok || !fileRes.body) return
+        if (!fileRes.ok || !fileRes.body) {
+          fetchFailed += 1
+          return
+        }
         const key = `${prefix}${rel}`
         seen.add(key)
         const body = await fileRes.arrayBuffer()
@@ -378,35 +466,58 @@ export class OpenCodeSession extends Container<Env> {
         await this.env.FILES.put(key, body, {
           httpMetadata: { contentType: contentType.split(";")[0].trim() },
         })
+        uploaded += 1
+        uploadedBytes += body.byteLength
       }),
     )
 
+    let staleDeleted = 0
     let cursor: string | undefined
     do {
       const list = await this.env.FILES.list({ prefix, cursor })
       cursor = list.truncated ? list.cursor : undefined
       const stale = list.objects.map((o) => o.key).filter((k) => !seen.has(k))
-      if (stale.length) await this.env.FILES.delete(stale)
+      if (stale.length) {
+        await this.env.FILES.delete(stale)
+        staleDeleted += stale.length
+      }
     } while (cursor)
+
+    logger.info("r2.sync.out", {
+      sessionId: this.sessionId,
+      listed: files.length,
+      uploaded,
+      uploadedBytes,
+      fetchFailed,
+      staleDeleted,
+      ms: Date.now() - t0,
+    })
   }
 
   private async teardown(): Promise<Response> {
+    const t0 = Date.now()
+    logger.info("teardown.start", { sessionId: this.sessionId })
     try {
       await this.stop()
-    } catch {}
+    } catch (e) {
+      logger.warn("teardown.stopFailed", { sessionId: this.sessionId, error: String(e) })
+    }
     await this.ctx.storage.delete("opencodeSessionId")
     await this.ctx.storage.delete("byokAiGatewayKey")
     await this.env.FILES.delete(historyKeyFor(this.sessionId)).catch(() => {})
     await this.env.FILES.delete(stateKeyFor(this.sessionId)).catch(() => {})
     const prefix = r2PrefixFor(this.sessionId)
+    let deleted = 0
     let cursor: string | undefined
     do {
       const list = await this.env.FILES.list({ prefix, cursor })
       cursor = list.truncated ? list.cursor : undefined
       if (list.objects.length) {
         await this.env.FILES.delete(list.objects.map((o) => o.key))
+        deleted += list.objects.length
       }
     } while (cursor)
+    logger.info("teardown.done", { sessionId: this.sessionId, filesDeleted: deleted, ms: Date.now() - t0 })
     return Response.json({ ok: true })
   }
 }
