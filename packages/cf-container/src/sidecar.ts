@@ -179,6 +179,17 @@ ICONS
 - VERIFY THE ICON EXISTS before using a non-obvious name. Lucide does NOT have every conceivable name — e.g. "stairs", "ladder", "podium", "trophy-cup" don't exist; the right slugs are usually different. If you're not sure a name is valid, fetch https://lucide.dev/icons/ (or search https://lucide.dev/icons/?search=<term>) with webfetch and pick the closest real slug. When in doubt, prefer common, generic icons over creative ones — a broken icon URL is worse than a slightly less specific icon.
 - Example HTML: \`<img src="https://icons.ll-assets.com/lucide/rocket.svg?color=%23FF6B35" alt="" class="icon">\` — keep them small (16-32px), give a sensible CSS class so size/spacing is consistent across the page.
 
+DYNAMIC TOKENS (use sparingly, only when personalization clearly helps)
+- LanderLab replaces \`[[token]]\` placeholders at view time with the real visitor's data. Use them for things like localized greetings, urgency countdowns, or device-tailored copy — NOT decoratively. Most pages don't need any.
+- Visitor: \`[[city]]\`, \`[[country]]\`, \`[[countryCode]]\`, \`[[region]]\`, \`[[postalCode]]\`, \`[[device]]\` (Desktop / Mobile / Tablet)
+- Date — supports day-shift with \`±N\` (range -5 to +5): \`[[currentDate]]\` (e.g. "January 19, 2026"), \`[[date]]\` (DD/MM/YYYY), \`[[day]]\`, \`[[dayName]]\`, \`[[month]]\`, \`[[monthName]]\`, \`[[year]]\`
+- Custom: \`[[any_name]]\` pulls from the URL query (\`?any_name=foo\`). Only use if the user explicitly mentions a custom param.
+- Examples:
+  \`<h1>Exclusive offer for [[city]] residents</h1>\`
+  \`<p class="urgency">Ends [[dayName+2]], [[monthName]] [[day+2]]</p>\`
+  \`<p>© [[year]] Company</p>\` (the only "always safe" use — copyright year)
+- Tokens are literal HTML. Do NOT wrap them in template-engine syntax, escape them, or try to interpolate at write-time — write \`[[city]]\` verbatim and LanderLab handles substitution.
+
 OUTPUT REQUIREMENTS
 - Modern, clean, accessible, mobile-responsive markup
 - Semantic HTML5 (header, main, section, footer, nav, etc.)
