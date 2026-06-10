@@ -60,7 +60,7 @@ const opencodeStartedAt = Date.now()
 // container stdout → cf-worker tail. Without it the bus only carries squashed
 // `UnknownError: <message>` events and the real diagnostics die with the
 // container's log file. Level is overridable via OPENCODE_LOG_LEVEL.
-const OPENCODE_LOG_LEVEL = process.env.OPENCODE_LOG_LEVEL ?? "INFO"
+const OPENCODE_LOG_LEVEL = process.env.OPENCODE_LOG_LEVEL ?? "DEBUG"
 log.info("opencode.spawn", {
   host: OPENCODE_HOST,
   port: OPENCODE_PORT,
