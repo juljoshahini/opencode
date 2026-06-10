@@ -157,6 +157,17 @@ export class OpenCodeSession extends Container<Env> {
     let streamedBytes = 0
     let streamedChunks = 0
     const tStreamStart = Date.now()
+    // Eager image sync: tool outputs carry a publicUrl that only becomes
+    // fetchable once the workspace syncs to R2 — normally at turn end. When
+    // we spot an image-producing tool completing mid-stream, sync right away
+    // (debounced) so the frontend's thumbnails load seconds after generation
+    // instead of after the whole turn. `eagerWindow` is a small sliding
+    // window over the decoded stream so markers split across chunks still
+    // match.
+    let eagerWindow = ""
+    let lastEagerSyncAt = 0
+    const EAGER_SYNC_DEBOUNCE_MS = 8_000
+    const EAGER_TOOL_RX = /"tool":\s*"(?:image_generate|image_use|imageTool)"/
 
     const stream = new ReadableStream<Uint8Array>({
       async pull(controller) {
@@ -202,7 +213,21 @@ export class OpenCodeSession extends Container<Env> {
         streamedBytes += value.byteLength
         streamedChunks += 1
         controller.enqueue(value)
-        textBuffer += decoder.decode(value, { stream: true })
+        const chunkText = decoder.decode(value, { stream: true })
+        textBuffer += chunkText
+
+        eagerWindow = (eagerWindow + chunkText).slice(-8192)
+        if (
+          eagerWindow.includes('"completed"') &&
+          EAGER_TOOL_RX.test(eagerWindow) &&
+          Date.now() - lastEagerSyncAt > EAGER_SYNC_DEBOUNCE_MS
+        ) {
+          lastEagerSyncAt = Date.now()
+          eagerWindow = ""
+          logger.info("r2.sync.eager", { runId, sessionId, streamedChunks })
+          sessionState.ctx.waitUntil(sessionState.syncToR2().catch(() => {}))
+        }
+
         if (!sawDone && textBuffer.includes("event: done")) {
           sawDone = true
           logger.info("stream.doneEvent", {
