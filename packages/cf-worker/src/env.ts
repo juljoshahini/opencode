@@ -10,7 +10,7 @@ export interface Env {
 
   ANTHROPIC_API_KEY?: string
   OPENAI_API_KEY?: string
-  OPENROUTER_API_KEY?: string
+  AI_GATEWAY_API_KEY?: string
   GOOGLE_GENERATIVE_AI_API_KEY?: string
   IMAGE_GEN_MODEL?: string
   R2_PUBLIC_BASE?: string
@@ -21,7 +21,7 @@ export interface Env {
 export const PROVIDER_VARS = [
   "ANTHROPIC_API_KEY",
   "OPENAI_API_KEY",
-  "OPENROUTER_API_KEY",
+  "AI_GATEWAY_API_KEY",
   "GOOGLE_GENERATIVE_AI_API_KEY",
   "IMAGE_GEN_MODEL",
   "R2_PUBLIC_BASE",

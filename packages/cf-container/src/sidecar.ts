@@ -305,7 +305,7 @@ ${renderTranscript(body.priorTranscript)}`
       const decoder = new TextDecoder()
       let buffer = ""
 
-      const defaultModel = { providerID: "openrouter", id: "anthropic/claude-opus-4-7" }
+      const defaultModel = { providerID: "vercel", id: "anthropic/claude-opus-4.8" }
       const resizedAttachments = await preprocessAttachments(body.attachments)
       const promptPromise = Opencode.promptAsync(sessionID, {
         prompt: body.prompt,

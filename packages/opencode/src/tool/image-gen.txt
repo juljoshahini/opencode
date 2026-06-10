@@ -1,4 +1,4 @@
-Generate an image from a text prompt using OpenAI gpt-image-2 via Cloudflare AI Gateway.
+Generate an image from a text prompt using Vercel AI Gateway.
 
 Use this tool whenever the user wants to:
 - Create a hero image, banner, or background for a landing page or website
@@ -10,7 +10,7 @@ The image is returned as an attachment so it can be referenced or saved with the
 
 Inputs:
 - prompt (required): Vivid, specific description of the image. Include subject, style, lighting, composition. When refining a prior image, describe ONLY the changes you want (e.g. "same composition, but warmer lighting and a sunset palette"), not the whole scene from scratch.
-- model (optional): OpenRouter model slug. Defaults to "google/gemini-3.1-flash-image-preview". Pass an override when the user explicitly names a model — examples: "openai/gpt-5.4-image-2", "google/gemini-3.1-flash-image-preview". If the user says something like "use OpenAI for the images" or "try the new gpt-image-2 model", pass that slug here instead of the default.
+- model (optional): Vercel AI Gateway model slug. Defaults to "google/gemini-3.1-flash-image-preview". Pass an override when the user explicitly names a model — examples: "openai/gpt-5.4-image-2", "google/gemini-3.1-flash-image-preview". If the user says something like "use OpenAI for the images" or "try the new gpt-image-2 model", pass that slug here instead of the default.
 - image (optional): Reference image to refine, restyle, or use as the visual starting point. MUST be an absolute http(s) URL — the model fetches it directly, so it has to be publicly reachable. Pass the publicUrl returned by a previous image_generate call, or any external public image URL. Workspace paths (e.g. "/workspace/abc.png") will NOT work. Use this whenever the user wants the new image to be derived from a prior one — for example: "tweak the hero", "make a darker version", "same image but with…", "refine that", "use the same illustration but…". When image is set, the model treats the prompt as instructions to apply to the reference rather than a fresh generation.
 
 Call this tool proactively when a landing page or UI needs visual content — you don't have to wait for the user to ask. Hero sections, product showcases, testimonials, team photos, feature illustrations, and other prominent visuals should be generated rather than left as `<img src="placeholder.png">` or stock CDN URLs. Default to using this tool whenever you write HTML that references an image asset you don't already have.

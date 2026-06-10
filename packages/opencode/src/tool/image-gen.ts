@@ -23,7 +23,7 @@ export const Parameters = Schema.Struct({
   }),
   model: Schema.optional(Schema.String).annotate({
     description:
-      "OpenRouter model slug for image generation (e.g. 'google/gemini-3.1-flash-image-preview', 'openai/gpt-5.4-image-2'). Omit to use the default. Override when the user asks for a specific model.",
+      "Vercel AI Gateway model slug for image generation (e.g. 'google/gemini-3.1-flash-image-preview', 'openai/gpt-5.4-image-2'). Omit to use the default. Override when the user asks for a specific model.",
   }),
   image: Schema.optional(Schema.String).annotate({
     description:
@@ -41,7 +41,7 @@ export const ImageGenTool = Tool.define(
       parameters: Parameters,
       execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
         Effect.gen(function* () {
-          const apiKey = process.env["OPENROUTER_API_KEY"]
+          const apiKey = process.env["AI_GATEWAY_API_KEY"]
           // Per-call model wins over the env-var default; lets the user say
           // "use openai/gpt-5.4-image-2" in their prompt without redeploying.
           const model = params.model?.trim() || process.env["IMAGE_GEN_MODEL"] || DEFAULT_MODEL
@@ -50,7 +50,7 @@ export const ImageGenTool = Tool.define(
           const workspace = process.env["WORKSPACE_DIR"] ?? process.cwd()
 
           if (!apiKey) {
-            throw new Error("image_generate requires OPENROUTER_API_KEY environment variable.")
+            throw new Error("image_generate requires AI_GATEWAY_API_KEY environment variable.")
           }
 
           yield* ctx.ask({
@@ -73,7 +73,7 @@ export const ImageGenTool = Tool.define(
               ]
             : params.prompt
 
-          const url = "https://openrouter.ai/api/v1/chat/completions"
+          const url = "https://ai-gateway.vercel.sh/v1/chat/completions"
           const body = {
             model,
             messages: [{ role: "user", content: userContent }],
@@ -104,12 +104,12 @@ export const ImageGenTool = Tool.define(
           }
 
           const images = parsed.choices?.[0]?.message?.images ?? []
-          if (images.length === 0) throw new Error("OpenRouter response did not include any images")
+          if (images.length === 0) throw new Error("AI Gateway response did not include any images")
 
           const first = images[0].image_url?.url
-          if (!first) throw new Error("OpenRouter image_url.url missing")
+          if (!first) throw new Error("AI Gateway image_url.url missing")
           const dataMatch = first.match(/^data:([^;,]+);base64,(.+)$/)
-          if (!dataMatch) throw new Error("Expected base64 data URL from OpenRouter")
+          if (!dataMatch) throw new Error("Expected base64 data URL from AI Gateway")
           const mime = dataMatch[1].toLowerCase()
           const ext = MIME_TO_EXT[mime] ?? "bin"
           const buf = Buffer.from(dataMatch[2], "base64")

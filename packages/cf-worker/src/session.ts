@@ -48,7 +48,7 @@ export class OpenCodeSession extends Container<Env> {
     if (path === "/__do/set-byok" && req.method === "POST") {
       const body = (await req.json().catch(() => ({}))) as { apiKey?: string }
       if (typeof body.apiKey === "string" && body.apiKey.trim()) {
-        await this.ctx.storage.put("byokOpenRouterKey", body.apiKey.trim())
+        await this.ctx.storage.put("byokAiGatewayKey", body.apiKey.trim())
         logger.info("byok.set", { sessionId: this.sessionId })
         return Response.json({ ok: true, stored: true })
       }
@@ -73,9 +73,9 @@ export class OpenCodeSession extends Container<Env> {
 
     const rawBody = await req.text()
 
-    const byok = await this.ctx.storage.get<string>("byokOpenRouterKey")
-    if (byok) this.envVars.OPENROUTER_API_KEY = byok
-    else if (this.env.OPENROUTER_API_KEY) this.envVars.OPENROUTER_API_KEY = this.env.OPENROUTER_API_KEY
+    const byok = await this.ctx.storage.get<string>("byokAiGatewayKey")
+    if (byok) this.envVars.AI_GATEWAY_API_KEY = byok
+    else if (this.env.AI_GATEWAY_API_KEY) this.envVars.AI_GATEWAY_API_KEY = this.env.AI_GATEWAY_API_KEY
 
     const tBootStart = Date.now()
     await this.startAndWaitForPorts(8080)
@@ -395,7 +395,7 @@ export class OpenCodeSession extends Container<Env> {
       await this.stop()
     } catch {}
     await this.ctx.storage.delete("opencodeSessionId")
-    await this.ctx.storage.delete("byokOpenRouterKey")
+    await this.ctx.storage.delete("byokAiGatewayKey")
     await this.env.FILES.delete(historyKeyFor(this.sessionId)).catch(() => {})
     await this.env.FILES.delete(stateKeyFor(this.sessionId)).catch(() => {})
     const prefix = r2PrefixFor(this.sessionId)
