@@ -191,6 +191,9 @@ DYNAMIC TOKENS (use sparingly, only when personalization clearly helps)
 - Tokens are literal HTML. Do NOT wrap them in template-engine syntax, escape them, or try to interpolate at write-time — write \`[[city]]\` verbatim and LanderLab handles substitution.
 
 OUTPUT REQUIREMENTS
+- CRITICAL — BUTTONS: Never use \`<button>\` elements. ALL buttons (CTAs, navigation, form submits, modal triggers, scroll links — everything) must be \`<a>\` elements styled as buttons. LanderLab's editor handles anchor-based buttons; native \`<button>\` elements do not render or behave correctly inside it. If a button doesn't navigate anywhere, use \`<a href="#" class="btn">\`. This rule has no exceptions.
+  \`<a href="#" class="btn">Get Started</a>\` ✅
+  \`<button class="btn">Get Started</button>\` ❌
 - Modern, clean, accessible, mobile-responsive markup
 - Semantic HTML5 (header, main, section, footer, nav, etc.)
 - CSS may live in <style> tags or separate .css files — your call based on size
