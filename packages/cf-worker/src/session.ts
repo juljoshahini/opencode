@@ -255,12 +255,15 @@ export class OpenCodeSession extends Container<Env> {
           ms: Date.now() - tStreamStart,
         })
         reader.cancel(reason).catch(() => {})
-        // Still persist whatever opencode produced so the next prompt has
-        // prior-conversation context. Without this hook, pull() never sees
-        // the upstream finish and the transcript is lost.
+        // The agent run usually SURVIVES a downstream disconnect — opencode's
+        // prompt loop is fire-and-forget inside the container. Snapshotting
+        // immediately here would capture mid-turn state and lose the turn
+        // (June 11 incident: turn completed 40s after the disconnect, but the
+        // only snapshot predated it). finalizeOrphanedRun keeps the container
+        // alive, polls until the run ends, then takes the real final snapshot.
         if (!sawDone && opencodeSessionForSync) {
           sawDone = true
-          sessionState.ctx.waitUntil(sessionState.finalizeRun(opencodeSessionForSync).catch(() => {}))
+          sessionState.ctx.waitUntil(sessionState.finalizeOrphanedRun(runId, opencodeSessionForSync).catch(() => {}))
         }
       },
     })
@@ -274,6 +277,62 @@ export class OpenCodeSession extends Container<Env> {
         "x-session-id": this.sessionId,
       },
     })
+  }
+
+  // Called when the downstream client disconnected mid-turn. The container's
+  // agent run keeps going on its own, so: take an immediate partial snapshot
+  // (in case the container dies), then keep the container alive and poll the
+  // sidecar until the run actually completes, then snapshot again — that
+  // final snapshot is the one that contains the full turn.
+  private async finalizeOrphanedRun(runId: string, opencodeSessionId: string | null): Promise<void> {
+    const t0 = Date.now()
+    const MAX_WAIT_MS = 5 * 60_000
+    const POLL_MS = 10_000
+
+    await this.finalizeRun(opencodeSessionId).catch(() => {})
+
+    while (Date.now() - t0 < MAX_WAIT_MS) {
+      this.renewActivityTimeout()
+      await new Promise((resolve) => setTimeout(resolve, POLL_MS))
+      let active = false
+      try {
+        const res = await this.containerFetch(
+          new Request("http://container/__run/active", {
+            method: "GET",
+            headers: this.sidecarHeaders,
+          }),
+          8080,
+        )
+        if (!res.ok) {
+          logger.warn("orphan.poll.failed", { runId, sessionId: this.sessionId, status: res.status })
+          break
+        }
+        const body = (await res.json()) as { active?: boolean; runMs?: number | null }
+        active = Boolean(body.active)
+      } catch (e) {
+        logger.warn("orphan.poll.threw", { runId, sessionId: this.sessionId, error: String(e) })
+        break
+      }
+      if (!active) {
+        logger.info("orphan.runCompleted", {
+          runId,
+          sessionId: this.sessionId,
+          opencodeSessionId,
+          waitedMs: Date.now() - t0,
+        })
+        await this.finalizeRun(opencodeSessionId).catch(() => {})
+        return
+      }
+    }
+
+    logger.warn("orphan.finalize.gaveUp", {
+      runId,
+      sessionId: this.sessionId,
+      opencodeSessionId,
+      waitedMs: Date.now() - t0,
+    })
+    // Last-resort snapshot — better partial than nothing.
+    await this.finalizeRun(opencodeSessionId).catch(() => {})
   }
 
   private async finalizeRun(opencodeSessionId: string | null): Promise<void> {

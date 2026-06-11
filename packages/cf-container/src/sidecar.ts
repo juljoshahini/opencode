@@ -669,6 +669,16 @@ async function handleRequest(req: Request, url: URL): Promise<Response> {
         return json({ ready: false }, 503)
       }
     }
+    // Is a /prompt run still in flight? The cf-worker DO polls this after a
+    // downstream disconnect so it can delay the final state snapshot until
+    // the orphaned run completes — snapshotting mid-turn loses the turn.
+    if (url.pathname === "/__run/active" && req.method === "GET") {
+      return json({
+        active: activeOpencodeSession !== null,
+        opencodeSessionId: activeOpencodeSession,
+        runMs: activeRunStartedAt ? Date.now() - activeRunStartedAt : null,
+      })
+    }
 
     // All routes below here need opencode running. Ensure it's been spawned
     // (auto-fallback for clients that skip /__state/start), then wait for HTTP.
