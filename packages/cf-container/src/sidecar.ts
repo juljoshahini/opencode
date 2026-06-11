@@ -293,8 +293,28 @@ The user worked with you previously in this workspace. Below is the prior transc
 ${renderTranscript(body.priorTranscript)}`
   }
 
-  if (sessionMutex.has(sessionID)) {
-    return err(`session ${sessionID} is busy; wait for the prior prompt to finish`, 409)
+  // If a prior run is still in flight (typical after a client disconnect —
+  // the orphaned run keeps working in here while the user already retries),
+  // WAIT for it instead of bouncing with a 409. The mutex map holds the
+  // prior run's promise, so we can await its completion with a cap. Only if
+  // it's still running after the grace period do we return the 409.
+  const priorRun = sessionMutex.get(sessionID)
+  if (priorRun) {
+    const WAIT_FOR_PRIOR_MS = 90_000
+    log.info("prompt.waitingForPriorRun", { runId, opencodeSessionId: sessionID, maxWaitMs: WAIT_FOR_PRIOR_MS })
+    const tWait = Date.now()
+    const released = await Promise.race([
+      Promise.resolve(priorRun).then(
+        () => true,
+        () => true,
+      ),
+      Bun.sleep(WAIT_FOR_PRIOR_MS).then(() => false),
+    ])
+    if (!released) {
+      log.warn("prompt.priorRunStillBusy", { runId, opencodeSessionId: sessionID, waitedMs: Date.now() - tWait })
+      return err(`session ${sessionID} is busy; wait for the prior prompt to finish`, 409)
+    }
+    log.info("prompt.priorRunReleased", { runId, opencodeSessionId: sessionID, waitedMs: Date.now() - tWait })
   }
 
   const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>()
