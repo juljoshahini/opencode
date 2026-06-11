@@ -275,6 +275,11 @@ export class OpenCodeSession extends Container<Env> {
         "cache-control": "no-cache, no-transform",
         "x-accel-buffering": "no",
         "x-session-id": this.sessionId,
+        // Correlation key: this same runId appears in DO logs (run.start,
+        // stream.*, orphan.*) and container logs (prompt.start, prompt.done).
+        // The backend surfaces it in failure diagnostics so one grep finds
+        // the whole story across all three systems.
+        "x-run-id": runId,
       },
     })
   }
