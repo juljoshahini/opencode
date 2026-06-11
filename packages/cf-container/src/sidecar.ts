@@ -337,6 +337,7 @@ ${renderTranscript(body.priorTranscript)}`
       let lastRealEventAt = Date.now()
       let heartbeatCount = 0
       let realEventCount = 0
+      let userPartsDropped = 0
       let lastRealEventType: string | null = null
       const STALL_MS = Number(process.env.STALL_MS ?? 300_000)
 
@@ -426,6 +427,18 @@ ${renderTranscript(body.priorTranscript)}`
               }
             }
 
+            // Source-level prompt-echo fix: our opencode fork stamps each
+            // part event with the owning message's role. User/system message
+            // parts (the user's own prompt text being re-broadcast for
+            // transcript-rendering clients) never leave the container.
+            if (event.type === "message.part.updated") {
+              const partRole = (event.properties as { role?: string } | undefined)?.role
+              if (partRole && partRole !== "assistant") {
+                userPartsDropped += 1
+                continue
+              }
+            }
+
             await sse(writer, event.type ?? "message", event)
 
             if (event.type === "permission.asked" && sid === sessionID) {
@@ -461,6 +474,7 @@ ${renderTranscript(body.priorTranscript)}`
         elapsedMs: Date.now() - t0,
         realEventsReceived: realEventCount,
         heartbeatsReceived: heartbeatCount,
+        userPartsDropped,
         aborted: abort.signal.aborted,
       })
     } catch (e) {

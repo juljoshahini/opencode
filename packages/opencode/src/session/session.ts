@@ -579,8 +579,18 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
       }
     })
 
+    // LanderLab fork: remember each message's role so part events can carry
+    // it. Stream consumers (the cf-container sidecar) use this to filter
+    // user-message parts at the source instead of racing the separate
+    // `message.updated` event. Bounded defensively — a container session
+    // never sees anywhere near this many messages.
+    const messageRolesById = new Map<string, string>()
+    const MESSAGE_ROLES_CAP = 10_000
+
     const updateMessage = <T extends MessageV2.Info>(msg: T): Effect.Effect<T> =>
       Effect.gen(function* () {
+        if (messageRolesById.size >= MESSAGE_ROLES_CAP) messageRolesById.clear()
+        messageRolesById.set(msg.id, msg.role)
         yield* sync.run(MessageV2.Event.Updated, { sessionID: msg.sessionID, info: msg })
         return msg
       }).pipe(Effect.withSpan("Session.updateMessage"))
@@ -591,6 +601,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
           sessionID: part.sessionID,
           part: structuredClone(part),
           time: Date.now(),
+          role: messageRolesById.get(part.messageID),
         })
         return part
       }).pipe(Effect.withSpan("Session.updatePart"))

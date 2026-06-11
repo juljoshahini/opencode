@@ -605,6 +605,11 @@ const PartUpdatedEventSchema = Schema.Struct({
   sessionID: SessionID,
   part: _Part,
   time: NonNegativeInt,
+  // LanderLab fork: the owning message's role, so stream consumers (the
+  // cf-container sidecar) can filter user-message parts deterministically
+  // instead of racing the separate `message.updated` event for role info.
+  // Optional — absent when the role isn't known at publish time.
+  role: Schema.optional(Schema.String),
 })
 
 const PartRemovedEventSchema = Schema.Struct({
