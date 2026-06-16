@@ -20,6 +20,29 @@ const MIME_TO_EXT: Record<string, string> = {
   "image/svg+xml": "svg",
 }
 
+// The agent supplies `filename`, and we write it under WORKSPACE_DIR. This tool
+// writes to disk DIRECTLY (not via the sidecar's resolveSafe), so it must do
+// its OWN containment check: force a single in-workspace path segment. Rejects
+// path separators, "..", absolute paths, leading dots (dot-paths are excluded
+// from the R2 sync), and NUL — so the agent can never escape the workspace.
+function safeWorkspaceName(name: string | undefined, fallback: string): string {
+  const trimmed = (name ?? "").trim()
+  if (!trimmed) return fallback
+  if (
+    trimmed !== path.basename(trimmed) ||
+    trimmed.includes("/") ||
+    trimmed.includes("\\") ||
+    trimmed.includes("\0") ||
+    trimmed.startsWith(".")
+  ) {
+    throw new Error(
+      `Invalid filename "${name}": must be a simple filename in the page folder ` +
+        `(no path separators, no "..", no leading dot).`,
+    )
+  }
+  return trimmed
+}
+
 export const Parameters = Schema.Struct({
   url: Schema.String.annotate({
     description: "Public URL of the image to download.",
@@ -41,8 +64,11 @@ export const ImageUseTool = Tool.define(
             throw new Error("URL must start with http:// or https://")
           }
 
-          const sessionId = process.env["WORKER_SESSION_ID"]
           const publicBase = process.env["R2_PUBLIC_BASE"]
+          // Workspace lives in the draft bucket (variants/unpublished/<encId>/);
+          // images saved here are referenced RELATIVELY in HTML. This prefix is
+          // only for building the chat-thumbnail absolute URL.
+          const draftPrefix = (process.env["WORKER_DRAFT_PREFIX"] ?? "").replace(/^\/+|\/+$/g, "")
           const workspace = process.env["WORKSPACE_DIR"] ?? process.cwd()
 
           yield* ctx.ask({
@@ -66,7 +92,7 @@ export const ImageUseTool = Tool.define(
             throw new Error(`URL did not return an image (content-type: ${contentType})`)
           }
           const ext = MIME_TO_EXT[contentType] ?? "bin"
-          const filename = params.filename ?? `${crypto.randomUUID()}.${ext}`
+          const filename = safeWorkspaceName(params.filename, `${crypto.randomUUID()}.${ext}`)
 
           const buf = yield* Effect.promise(() => res.arrayBuffer())
           const bytes = Buffer.from(buf)
@@ -74,8 +100,8 @@ export const ImageUseTool = Tool.define(
           yield* Effect.promise(() => fs.writeFile(path.join(workspace, filename), bytes))
 
           const publicUrl =
-            publicBase && sessionId
-              ? `${publicBase.replace(/\/+$/, "")}/sessions/${sessionId}/${filename}`
+            publicBase && draftPrefix
+              ? `${publicBase.replace(/\/+$/, "")}/${draftPrefix}/${filename}`
               : null
 
           const tooLargeForInline = bytes.byteLength > MAX_ATTACHMENT_BYTES
@@ -84,13 +110,13 @@ export const ImageUseTool = Tool.define(
           return {
             title: `Saved ${filename}`,
             output: [
-              `Downloaded ${params.url} (${bytes.byteLength} bytes, ${contentType}).`,
-              `Saved to /workspace/${filename}.`,
-              publicUrl ? `Public URL (available after the prompt completes): ${publicUrl}` : `Local only as ${filename}.`,
+              `Downloaded ${params.url} (${bytes.byteLength} bytes, ${contentType}) as ${filename}.`,
+              publicUrl
+                ? `Reference it in HTML with this ABSOLUTE URL: <img src="${publicUrl}" alt="..."> — it resolves to your draft on the CDN (live after this turn saves).`
+                : `Saved locally as ${filename}.`,
               tooLargeForInline
                 ? `(${bytes.byteLength} bytes exceeds the ${MAX_ATTACHMENT_BYTES}-byte inline limit, not attached.)`
                 : null,
-              `Use this in HTML: <img src="${publicUrl ?? `./${filename}`}" alt="...">.`,
             ]
               .filter(Boolean)
               .join("\n"),

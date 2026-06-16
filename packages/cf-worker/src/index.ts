@@ -1,8 +1,15 @@
 import { Hono } from "hono"
 import { cors } from "hono/cors"
-import { type Env, r2PrefixFor } from "./env"
+import { type Env, draftPrefixFor, draftKeyFor } from "./env"
 import { bearerAuth } from "./auth"
 import { OpenCodeSession } from "./session"
+
+// A session's files ARE the variant draft in landerlab-prod:
+// variants/unpublished/<id>/, where id is the session id = the variant's
+// encryptedId (the backend sends it that way). These routes (used by the
+// backend's CFWorkerService to read/write/list the workspace) operate on that
+// bucket. Every per-file key goes through draftKeyFor, which refuses any path
+// that could escape the per-session prefix (returns null -> 400 here).
 
 export { OpenCodeSession }
 
@@ -53,9 +60,10 @@ app.post("/sessions", async (c) => {
 app.put("/sessions/:id/files/:path{.+}", async (c) => {
   const id = c.req.param("id")
   const rel = c.req.param("path")
-  const key = `${r2PrefixFor(id)}${rel}`
+  const key = draftKeyFor(id, rel)
+  if (key === null) return c.json({ error: "invalid path" }, 400)
   const body = await c.req.arrayBuffer()
-  await c.env.FILES.put(key, body, {
+  await c.env.PROD.put(key, body, {
     httpMetadata: { contentType: c.req.header("content-type") ?? "application/octet-stream" },
   })
   return c.json({ ok: true, bytes: body.byteLength, path: rel })
@@ -63,11 +71,11 @@ app.put("/sessions/:id/files/:path{.+}", async (c) => {
 
 app.get("/sessions/:id/files", async (c) => {
   const id = c.req.param("id")
-  const prefix = r2PrefixFor(id)
+  const prefix = draftPrefixFor(id)
   const out: { path: string; size: number; uploaded: string }[] = []
   let cursor: string | undefined
   do {
-    const list = await c.env.FILES.list({ prefix, cursor })
+    const list = await c.env.PROD.list({ prefix, cursor })
     cursor = list.truncated ? list.cursor : undefined
     for (const obj of list.objects) {
       out.push({
@@ -83,7 +91,9 @@ app.get("/sessions/:id/files", async (c) => {
 app.get("/sessions/:id/files/:path{.+}", async (c) => {
   const id = c.req.param("id")
   const rel = c.req.param("path")
-  const got = await c.env.FILES.get(`${r2PrefixFor(id)}${rel}`)
+  const key = draftKeyFor(id, rel)
+  if (key === null) return c.json({ error: "invalid path" }, 400)
+  const got = await c.env.PROD.get(key)
   if (!got) return c.json({ error: "not found" }, 404)
   const headers = new Headers()
   got.writeHttpMetadata(headers)
@@ -94,7 +104,9 @@ app.get("/sessions/:id/files/:path{.+}", async (c) => {
 app.delete("/sessions/:id/files/:path{.+}", async (c) => {
   const id = c.req.param("id")
   const rel = c.req.param("path")
-  await c.env.FILES.delete(`${r2PrefixFor(id)}${rel}`)
+  const key = draftKeyFor(id, rel)
+  if (key === null) return c.json({ error: "invalid path" }, 400)
+  await c.env.PROD.delete(key)
   return c.json({ ok: true })
 })
 

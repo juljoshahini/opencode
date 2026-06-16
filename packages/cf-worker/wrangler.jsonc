@@ -8,6 +8,22 @@
   "observability": {
     "enabled": true
   },
+  "vars": {
+    // Base URL of the LanderLab backend agent API. The settings_get /
+    // settings_update tools call ${LANDERLAB_API_BASE}/agent/settings with the
+    // per-turn agent JWT. Must include the /api/v2 base path.
+    "LANDERLAB_API_BASE": "https://backend-v2-test.landerlab.workers.dev/api/v2",
+    // Public asset CDN host for the landerlab-prod bucket (where the draft
+    // workspace lives). Assets are referenced in the page (and chat thumbnails)
+    // as ${R2_PUBLIC_BASE}/variants/unpublished/<encId>/<relPath>. NOTE: if an
+    // R2_PUBLIC_BASE *secret* exists pointing at the old r2.dev host, delete it —
+    // a secret overrides this var.
+    "R2_PUBLIC_BASE": "https://static.ll-assets.com",
+    // Preview host. The DO forms the agent's preview URL as
+    // ${LANDERLAB_PREVIEW_BASE}/variants/<encryptedVariantId>; the agent can
+    // url_screenshot it to see the rendered draft.
+    "LANDERLAB_PREVIEW_BASE": "https://preview.landerlabpages.com"
+  },
   "containers": [
     {
       "class_name": "OpenCodeSession",
@@ -35,7 +51,13 @@
   "r2_buckets": [
     {
       "binding": "FILES",
-      "bucket_name": "opencode-test"
+      "bucket_name": "openlanderlab"
+    },
+    {
+      // The agent workspace lives here as the variant draft:
+      // variants/unpublished/<encryptedVariantId>/. Same account as opencode-cf.
+      "binding": "PROD",
+      "bucket_name": "landerlab-prod"
     }
   ]
 }

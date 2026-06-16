@@ -1,5 +1,5 @@
 import { Container } from "@cloudflare/containers"
-import { type Env, PROVIDER_VARS, historyKeyFor, r2PrefixFor, stateKeyFor } from "./env"
+import { type Env, PROVIDER_VARS, historyKeyFor, r2PrefixFor, stateKeyFor, draftPrefixFor, draftKeyFor } from "./env"
 import { logger } from "./log"
 
 type Turn = { role: "user" | "assistant"; text: string; time?: number }
@@ -76,6 +76,17 @@ export class OpenCodeSession extends Container<Env> {
     const byok = await this.ctx.storage.get<string>("byokAiGatewayKey")
     if (byok) this.envVars.AI_GATEWAY_API_KEY = byok
     else if (this.env.AI_GATEWAY_API_KEY) this.envVars.AI_GATEWAY_API_KEY = this.env.AI_GATEWAY_API_KEY
+
+    // Tell the container where its workspace lives in the draft bucket so
+    // image_generate can form public URLs (R2_PUBLIC_BASE + this prefix) and
+    // reference images relatively in HTML. Set before the container starts.
+    this.envVars.WORKER_DRAFT_PREFIX = this.draftPrefix()
+
+    // The exact per-variant preview URL, so the agent can url_screenshot the
+    // rendered draft without guessing the id format. The session id IS the
+    // variant's encryptedId (the backend sends it that way).
+    const previewBase = (this.env.LANDERLAB_PREVIEW_BASE ?? "https://preview.landerlabpages.com").replace(/\/+$/, "")
+    this.envVars.WORKER_PREVIEW_URL = `${previewBase}/variants/${this.sessionId}`
 
     const tBootStart = Date.now()
     await this.startAndWaitForPorts(8080)
@@ -483,18 +494,27 @@ export class OpenCodeSession extends Container<Env> {
     logger.info("transcript.saved", { sessionId: this.sessionId, opencodeSessionId, turns: turns.length })
   }
 
+  // The session id IS the variant's encryptedId (the backend sends it that
+  // way), so it's the draft folder name directly — no derivation needed.
+  private draftPrefix(): string {
+    return draftPrefixFor(this.sessionId)
+  }
+
+  // Pull the variant's CURRENT draft (landerlab-prod/variants/unpublished/<encId>/)
+  // into the container so the agent edits the live draft, not a stale copy.
   private async syncFromR2(): Promise<number> {
-    const prefix = r2PrefixFor(this.sessionId)
+    const prefix = this.draftPrefix()
     let cursor: string | undefined
     let count = 0
     do {
-      const list = await this.env.FILES.list({ prefix, cursor })
+      const list = await this.env.PROD.list({ prefix, cursor })
       cursor = list.truncated ? list.cursor : undefined
       await Promise.all(
         list.objects.map(async (obj) => {
           const rel = obj.key.slice(prefix.length)
-          if (!rel) return
-          const got = await this.env.FILES.get(obj.key)
+          // Skip the directory marker and any internal/dot paths.
+          if (!rel || rel.startsWith(".")) return
+          const got = await this.env.PROD.get(obj.key)
           if (!got) return
           count += 1
           await this.containerFetch(
@@ -511,9 +531,13 @@ export class OpenCodeSession extends Container<Env> {
     return count
   }
 
+  // Push the agent workspace OUT to the variant draft
+  // (landerlab-prod/variants/unpublished/<encId>/). Excludes internal/dot
+  // paths (e.g. .screenshots) so agent scratch never reaches the draft (and
+  // thus never gets Published onto the live page).
   private async syncToR2(): Promise<void> {
     const t0 = Date.now()
-    const prefix = r2PrefixFor(this.sessionId)
+    const prefix = this.draftPrefix()
     const listRes = await this.containerFetch(
       new Request("http://container/list", {
         method: "GET",
@@ -525,7 +549,17 @@ export class OpenCodeSession extends Container<Env> {
       logger.warn("r2.sync.out.listFailed", { sessionId: this.sessionId, status: listRes.status })
       return
     }
-    const { files } = (await listRes.json()) as { files: string[] }
+    const allFiles = (await listRes.json()) as { files: string[] }
+    // Deliverables only — never sync dot-paths into the published-able draft.
+    const files = allFiles.files.filter((rel) => rel && !rel.split("/").some((seg) => seg.startsWith(".")))
+
+    // SAFETY GUARD: an empty workspace almost always means the sidecar/list
+    // failed or the container booted blank — NOT that the user wants their
+    // draft emptied. Never let that prune the real draft.
+    if (files.length === 0) {
+      logger.warn("r2.sync.out.emptyWorkspace.skipPrune", { sessionId: this.sessionId, listed: allFiles.files.length })
+      return
+    }
 
     let uploaded = 0
     let uploadedBytes = 0
@@ -544,7 +578,14 @@ export class OpenCodeSession extends Container<Env> {
           fetchFailed += 1
           return
         }
-        const key = `${prefix}${rel}`
+        // Defense-in-depth: route the key through the same guard as the file
+        // routes. `rel` comes from the container list and is already proven
+        // safe, but this makes the per-session prefix an enforced invariant.
+        const key = draftKeyFor(this.sessionId, rel)
+        if (key === null) {
+          logger.warn("r2.sync.out.unsafePath.skip", { sessionId: this.sessionId, rel })
+          return
+        }
         seen.add(key)
         const body = await fileRes.arrayBuffer()
         // Forward the container's Content-Type (Bun.file infers from extension)
@@ -552,7 +593,7 @@ export class OpenCodeSession extends Container<Env> {
         // when fetched from R2 via a public URL. Without this, browsers render
         // SVGs as text and treat HTML as application/octet-stream.
         const contentType = fileRes.headers.get("content-type") ?? "application/octet-stream"
-        await this.env.FILES.put(key, body, {
+        await this.env.PROD.put(key, body, {
           httpMetadata: { contentType: contentType.split(";")[0].trim() },
         })
         uploaded += 1
@@ -560,21 +601,35 @@ export class OpenCodeSession extends Container<Env> {
       }),
     )
 
+    // Don't prune if more than half the fetches failed — a flaky sidecar
+    // shouldn't delete draft files it simply couldn't read this pass.
     let staleDeleted = 0
-    let cursor: string | undefined
-    do {
-      const list = await this.env.FILES.list({ prefix, cursor })
-      cursor = list.truncated ? list.cursor : undefined
-      const stale = list.objects.map((o) => o.key).filter((k) => !seen.has(k))
-      if (stale.length) {
-        await this.env.FILES.delete(stale)
-        staleDeleted += stale.length
-      }
-    } while (cursor)
+    if (fetchFailed > files.length / 2) {
+      logger.warn("r2.sync.out.tooManyFetchFails.skipPrune", {
+        sessionId: this.sessionId,
+        files: files.length,
+        fetchFailed,
+      })
+    } else {
+      let cursor: string | undefined
+      do {
+        const list = await this.env.PROD.list({ prefix, cursor })
+        cursor = list.truncated ? list.cursor : undefined
+        // Only prune deliverables we own; never touch dot-path objects.
+        const stale = list.objects
+          .map((o) => o.key)
+          .filter((k) => !seen.has(k) && !k.slice(prefix.length).split("/").some((seg) => seg.startsWith(".")))
+        if (stale.length) {
+          await this.env.PROD.delete(stale)
+          staleDeleted += stale.length
+        }
+      } while (cursor)
+    }
 
     logger.info("r2.sync.out", {
       sessionId: this.sessionId,
-      listed: files.length,
+      prefix,
+      listed: allFiles.files.length,
       uploaded,
       uploadedBytes,
       fetchFailed,
@@ -595,6 +650,9 @@ export class OpenCodeSession extends Container<Env> {
     await this.ctx.storage.delete("byokAiGatewayKey")
     await this.env.FILES.delete(historyKeyFor(this.sessionId)).catch(() => {})
     await this.env.FILES.delete(stateKeyFor(this.sessionId)).catch(() => {})
+    // IMPORTANT: teardown only clears agent INTERNALS on openlanderlab (FILES).
+    // It must NEVER touch this.env.PROD — that's the user's variant draft in
+    // landerlab-prod, not session-scoped junk.
     const prefix = r2PrefixFor(this.sessionId)
     let deleted = 0
     let cursor: string | undefined

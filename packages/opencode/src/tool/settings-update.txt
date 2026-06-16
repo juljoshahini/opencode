@@ -1,0 +1,8 @@
+Update the lander's settings (page title, language, favicon, SEO keywords/description) with a partial patch.
+
+Usage:
+- ALWAYS call settings_get FIRST and build the patch using only fields from its returned `schema`. Unknown fields are rejected.
+- Send only what changes. Omitted sections and fields are left exactly as they are — this is a merge, not a replace.
+- The update applies immediately when this tool returns ok — no extra publish step is needed for settings.
+- If the call fails with a validation error (400), the error message names the offending field and the valid fields — fix the patch and retry once.
+- Use this when the user asks to change page metadata (title, SEO description, keywords, language, favicon). Do NOT also edit <title>/<meta> tags in the HTML for the same request — settings are applied at serve time and take precedence.

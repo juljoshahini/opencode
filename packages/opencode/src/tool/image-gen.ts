@@ -45,8 +45,12 @@ export const ImageGenTool = Tool.define(
           // Per-call model wins over the env-var default; lets the user say
           // "use openai/gpt-5.4-image-2" in their prompt without redeploying.
           const model = params.model?.trim() || process.env["IMAGE_GEN_MODEL"] || DEFAULT_MODEL
-          const sessionId = process.env["WORKER_SESSION_ID"]
           const publicBase = process.env["R2_PUBLIC_BASE"]
+          // Where the workspace lives in the draft bucket, e.g.
+          // "variants/unpublished/<encId>/". The image is written into the
+          // workspace, so in HTML it's referenced RELATIVELY; this prefix is
+          // only used to build an absolute URL for the chat thumbnail.
+          const draftPrefix = (process.env["WORKER_DRAFT_PREFIX"] ?? "").replace(/^\/+|\/+$/g, "")
           const workspace = process.env["WORKSPACE_DIR"] ?? process.cwd()
 
           if (!apiKey) {
@@ -118,18 +122,21 @@ export const ImageGenTool = Tool.define(
           yield* Effect.promise(() => fs.mkdir(workspace, { recursive: true }))
           yield* Effect.promise(() => fs.writeFile(path.join(workspace, filename), buf))
 
+          // The image lives in the workspace = the draft folder, so the HTML
+          // reference is always RELATIVE (resolves under both the unpublished
+          // preview and the published live URL). publicUrl is for the chat
+          // thumbnail only.
           const publicUrl =
-            publicBase && sessionId
-              ? `${publicBase.replace(/\/+$/, "")}/sessions/${sessionId}/${filename}`
+            publicBase && draftPrefix
+              ? `${publicBase.replace(/\/+$/, "")}/${draftPrefix}/${filename}`
               : null
 
           const lines = [
-            `Saved generated image to /workspace/${filename} (${buf.byteLength} bytes, ${mime}).`,
+            `Saved generated image as ${filename} (${buf.byteLength} bytes, ${mime}).`,
             publicUrl
-              ? `Public URL (available after the prompt completes and R2 sync runs): ${publicUrl}`
-              : `No R2 public base URL configured — only saved locally as ${filename}.`,
-            `Reference the image in HTML using src="${publicUrl ?? `./${filename}`}".`,
-          ]
+              ? `Reference it in HTML with this ABSOLUTE URL: <img src="${publicUrl}" alt="..."> — it resolves to your draft on the CDN (live after this turn saves).`
+              : `Saved locally as ${filename}.`,
+          ].filter(Boolean) as string[]
 
           return {
             title: params.prompt.length > 60 ? params.prompt.slice(0, 57) + "..." : params.prompt,

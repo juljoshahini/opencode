@@ -1,0 +1,11 @@
+Read the lander's settings (page title, language, favicon, SEO keywords/description).
+
+The response contains three things:
+- `settings`: the current values
+- `schema`: the EXACT set of editable fields with their types and constraints — this is the source of truth; never assume fields that aren't listed here
+- `schemaVersion`: bump indicates the editable surface changed
+
+Usage:
+- ALWAYS call this before settings_update — construct your patch only from fields present in the returned `schema`.
+- Use when the user asks about or wants to change page metadata: title, SEO description, keywords, language, favicon.
+- These settings are managed by LanderLab and applied at serve time — they are separate from (and take precedence over) any <title>/<meta> tags in the HTML you write.

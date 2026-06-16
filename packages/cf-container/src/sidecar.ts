@@ -122,16 +122,26 @@ type PromptBody = {
   sessionId?: string
   agent?: string
   model?: { providerID: string; id: string; variant?: string }
-  // OpenRouter model slug for image_generate tool calls. Accepts either a
-  // plain string ("openai/gpt-5.4-image-2") or the same {providerID, modelID}
-  // shape as `model` for symmetry — modelID is what actually gets passed.
+  // Model slug for image_generate tool calls. Accepts either a plain string
+  // ("openai/gpt-5.4-image-2") or the same {providerID, modelID} shape as
+  // `model` for symmetry — modelID is what actually gets passed.
   imageModel?: string | { providerID?: string; modelID?: string; id?: string }
+  // Short-lived JWT minted by backend-v2 per chat turn. Written to
+  // AGENT_TOKEN_FILE before the prompt runs; the settings_get /
+  // settings_update tools read it from there to call the /agent API.
+  agentToken?: string
   title?: string
   permission?: unknown
   system?: string
   priorTranscript?: Opencode.Turn[]
   attachments?: Opencode.Attachment[]
 }
+
+// Where the agent token lives inside the container. The opencode process is
+// already running when prompts arrive, so per-turn values can't travel via
+// env vars — a file is the handoff. The session mutex guarantees one run at
+// a time, so there's no token race between concurrent prompts.
+const AGENT_TOKEN_FILE = process.env.AGENT_TOKEN_FILE ?? "/tmp/.agent-token"
 
 function resolveImageModel(input: PromptBody["imageModel"]): string | undefined {
   if (!input) return undefined
@@ -274,6 +284,30 @@ async function handlePrompt(req: Request): Promise<Response> {
 
   let systemPrompt = body.system ?? LANDING_PAGE_SYSTEM
 
+  // Tell the agent where its page renders, and — critically — that its edits
+  // only become visible there AFTER the turn ends, so it must not screenshot
+  // the preview to check its own just-made changes.
+  const previewUrl = process.env["WORKER_PREVIEW_URL"]
+  if (previewUrl) {
+    // Absolute CDN base for this variant's files, e.g.
+    // https://static.ll-assets.com/variants/unpublished/<encId>/ — the agent
+    // references every asset by this base + the file's path inside the folder.
+    const assetHost = (process.env["R2_PUBLIC_BASE"] ?? "").replace(/\/+$/, "")
+    const draftRel = (process.env["WORKER_DRAFT_PREFIX"] ?? "").replace(/^\/+|\/+$/g, "")
+    const assetBase = assetHost && draftRel ? `${assetHost}/${draftRel}/` : null
+    const assetLine = assetBase
+      ? `- Reference EVERY asset (image, stylesheet, script) by its ABSOLUTE CDN URL: \`${assetBase}<path>\`, where \`<path>\` is the file's path inside the page folder — e.g. \`href="${assetBase}style.css"\`, \`src="${assetBase}img/hero.png"\`, \`src="${assetBase}app.js"\`. Do NOT use bare relative paths, and do NOT hard-code any other host. (image_generate / image_use already return the full URL to use.)`
+      : `- Reference assets relatively in the HTML (e.g. \`href="./style.css"\`, \`src="./img/hero.png"\`).`
+    systemPrompt = `${systemPrompt}
+
+## PREVIEW URL
+This page renders at: ${previewUrl}
+- IMPORTANT — SAVE TIMING: your file edits (write/edit and generated images) are saved to the draft only at the END of your turn, not immediately. The preview renders the SAVED draft, so DURING your turn it still shows the state from BEFORE your current edits.
+- Therefore do NOT screenshot this preview to verify work you just did this turn — it will show the OLD version and mislead you. This is NOT a cache bug, NOT a stale stylesheet, and NOT something to "fix" with extra edits. Trust your edits; they go live in the preview the moment your turn finishes.
+- url_screenshot is for EXTERNAL reference pages (a design the user wants to match) — or, in a LATER turn, to review changes you saved in a PREVIOUS turn. Never to check your own current-turn edits.
+${assetLine}`
+  }
+
   const imageModel = resolveImageModel(body.imageModel)
   if (imageModel) {
     // Inject as a hard instruction so the agent passes this exact model on
@@ -336,6 +370,15 @@ ${renderTranscript(body.priorTranscript)}`
       const reader = eventRes.body!.getReader()
       const decoder = new TextDecoder()
       let buffer = ""
+
+      // Refresh the agent token for this run (or remove a stale one so the
+      // settings tools fail with a clear "no token" instead of a confusing
+      // expired-JWT 401 from a previous turn).
+      if (body.agentToken) {
+        await fs.writeFile(AGENT_TOKEN_FILE, body.agentToken, { mode: 0o600 })
+      } else {
+        await fs.rm(AGENT_TOKEN_FILE, { force: true })
+      }
 
       const defaultModel = { providerID: "vercel", id: "anthropic/claude-opus-4.8" }
       const resizedAttachments = await preprocessAttachments(body.attachments)
