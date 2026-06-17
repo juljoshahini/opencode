@@ -19,9 +19,8 @@ import { UrlScreenshotTool } from "./url-screenshot"
 import { UrlRenderTool } from "./url-render"
 import { WriteTool } from "./write"
 import { DeleteTool } from "./delete"
-// SETTINGS (disabled for now — backend /agent endpoint not live yet):
-// import { SettingsGetTool } from "./settings-get"
-// import { SettingsUpdateTool } from "./settings-update"
+import { SettingsGetTool } from "./settings-get"
+import { SettingsUpdateTool } from "./settings-update"
 import { InvalidTool } from "./invalid"
 import { SkillTool } from "./skill"
 import * as Tool from "./tool"
@@ -134,8 +133,8 @@ export const layer: Layer.Layer<
     const globtool = yield* GlobTool
     const writetool = yield* WriteTool
     const deletetool = yield* DeleteTool
-    // SETTINGS: const settingsget = yield* SettingsGetTool
-    // SETTINGS: const settingsupdate = yield* SettingsUpdateTool
+    const settingsget = yield* SettingsGetTool
+    const settingsupdate = yield* SettingsUpdateTool
     const edit = yield* EditTool
     const greptool = yield* GrepTool
     const patchtool = yield* ApplyPatchTool
@@ -229,8 +228,8 @@ export const layer: Layer.Layer<
           edit: Tool.init(edit),
           write: Tool.init(writetool),
           delete: Tool.init(deletetool),
-          // SETTINGS: settingsget: Tool.init(settingsget),
-          // SETTINGS: settingsupdate: Tool.init(settingsupdate),
+          settingsget: Tool.init(settingsget),
+          settingsupdate: Tool.init(settingsupdate),
           task: Tool.init(task),
           fetch: Tool.init(webfetch),
           imagegen: Tool.init(imagegen),
@@ -259,8 +258,8 @@ export const layer: Layer.Layer<
             tool.edit,
             tool.write,
             tool.delete,
-            // SETTINGS: tool.settingsget,
-            // SETTINGS: tool.settingsupdate,
+            tool.settingsget,
+            tool.settingsupdate,
             tool.task,
             tool.fetch,
             tool.imagegen,

@@ -200,6 +200,13 @@ DYNAMIC TOKENS (use sparingly, only when personalization clearly helps)
   \`<p>© [[year]] Company</p>\` (the only "always safe" use — copyright year)
 - Tokens are literal HTML. Do NOT wrap them in template-engine syntax, escape them, or try to interpolate at write-time — write \`[[city]]\` verbatim and LanderLab handles substitution.
 
+LANDER SETTINGS
+- The lander has LanderLab-managed settings, separate from the HTML, applied at serve time: page title, language, favicon, SEO (keywords/description), custom head/body code (tracking pixels, scripts, meta), conversion tracking (visits/forms/links), and lead-saving behavior. Read them with settings_get; change them with settings_update (partial patch — only send what changes).
+- Settings can change BETWEEN turns — the user may edit them in the LanderLab UI while you work. So treat any settings values you saw in an EARLIER turn as STALE: call settings_get FRESH in the CURRENT turn before you read, report, or change settings, and never reuse a snapshot from a previous turn. Its response lists the EXACT editable fields and constraints in a \`schema\` — build your settings_update patch using only those field names (do not guess).
+- Use these tools (not HTML edits) when the user asks to change: page title, language, favicon, meta/SEO description or keywords, tracking/analytics/pixel scripts (custom head/body code), conversion tracking, or whether form submissions are saved as leads. Settings are applied at serve time and take precedence over equivalent <title>/<meta>/<script> tags in the HTML.
+- settings_update is a partial patch merged server-side (omitted fields are left untouched) and applies immediately on success (no separate publish step). When you change a field that builds on its current value (e.g. appending to keywords or custom code), base it on THIS turn's fresh settings_get — not an older value — so you don't clobber an edit the user just made in the UI. On a validation error, the message names the bad field — fix and retry once.
+- If the tools report that no token is available, tell the user settings can't be changed right now and continue with the rest of their request.
+
 OUTPUT REQUIREMENTS
 - Never use \`<button>\` elements. ALL buttons (CTAs, navigation, form submits, modal triggers, scroll links — everything) must be \`<a>\` elements styled as buttons. Example: \`<a href="#" class="btn">\`.
 - Modern, clean, accessible, mobile-responsive markup
@@ -296,7 +303,7 @@ async function handlePrompt(req: Request): Promise<Response> {
     const draftRel = (process.env["WORKER_DRAFT_PREFIX"] ?? "").replace(/^\/+|\/+$/g, "")
     const assetBase = assetHost && draftRel ? `${assetHost}/${draftRel}/` : null
     const assetLine = assetBase
-      ? `- Reference EVERY asset (image, stylesheet, script) by its ABSOLUTE CDN URL: \`${assetBase}<path>\`, where \`<path>\` is the file's path inside the page folder — e.g. \`href="${assetBase}style.css"\`, \`src="${assetBase}img/hero.png"\`, \`src="${assetBase}app.js"\`. Do NOT use bare relative paths, and do NOT hard-code any other host. (image_generate / image_use already return the full URL to use.)`
+      ? `- Reference EVERY asset (image, stylesheet, script) by its ABSOLUTE CDN URL: \`${assetBase}<path>\`, where \`<path>\` is the file's path inside the page folder — e.g. \`href="${assetBase}style.css"\`, \`src="${assetBase}img/hero.png"\`, \`src="${assetBase}app.js"\`. Do NOT use bare relative paths, and do NOT hard-code any other host. (image_generate / image_use already return the full URL to use.) Write URLs WITHOUT a query string — the system auto-appends a \`?v=\` cache-buster when it saves, so edited CSS/images refresh immediately; don't add or remove a \`?v=\` yourself.`
       : `- Reference assets relatively in the HTML (e.g. \`href="./style.css"\`, \`src="./img/hero.png"\`).`
     systemPrompt = `${systemPrompt}
 

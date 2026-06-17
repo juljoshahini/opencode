@@ -4,6 +4,18 @@ import { logger } from "./log"
 
 type Turn = { role: "user" | "assistant"; text: string; time?: number }
 
+// Append/replace a `?v=<ver>` cache-buster on every reference to a specific
+// asset base inside an HTML string. The draft is served from a CDN that caches
+// by URL, so an edited style.css/img would otherwise stay stale at its
+// unchanged URL; bumping `?v=` each turn changes the URL -> guaranteed fresh.
+// Matches the base + path in href/src/srcset and inline url(...), and drops any
+// existing query so re-stamping every turn replaces rather than stacks.
+function stampAssetVersions(html: string, assetBase: string, ver: string): string {
+  const esc = assetBase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const re = new RegExp(`(${esc}[^"'?\\s)>]+)(\\?[^"'\\s)>]*)?`, "g")
+  return html.replace(re, (_m, path) => `${path}?v=${ver}`)
+}
+
 export class OpenCodeSession extends Container<Env> {
   defaultPort = 8080
   sleepAfter = "60s"
@@ -561,6 +573,13 @@ export class OpenCodeSession extends Container<Env> {
       return
     }
 
+    // One cache-buster per sync, stamped onto this variant's draft asset refs
+    // inside HTML (see stampAssetVersions). assetBase = the public CDN URL for
+    // this draft, e.g. https://static.ll-assets.com/variants/unpublished/<id>/.
+    const cacheBust = crypto.randomUUID().slice(0, 8)
+    const publicBase = (this.env.R2_PUBLIC_BASE ?? "").replace(/\/+$/, "")
+    const assetBase = publicBase ? `${publicBase}/${prefix}` : null
+
     let uploaded = 0
     let uploadedBytes = 0
     let fetchFailed = 0
@@ -592,9 +611,14 @@ export class OpenCodeSession extends Container<Env> {
         // so SVGs, HTML, CSS, JS, images etc. are served with the right MIME
         // when fetched from R2 via a public URL. Without this, browsers render
         // SVGs as text and treat HTML as application/octet-stream.
-        const contentType = fileRes.headers.get("content-type") ?? "application/octet-stream"
-        await this.env.PROD.put(key, body, {
-          httpMetadata: { contentType: contentType.split(";")[0].trim() },
+        const mime = (fileRes.headers.get("content-type") ?? "application/octet-stream").split(";")[0].trim()
+        // For HTML, stamp a fresh ?v= onto draft asset refs so an edited
+        // style.css/image can't be served stale from the CDN's URL cache.
+        const isHtml = mime === "text/html" || rel.toLowerCase().endsWith(".html")
+        const putBody: ArrayBuffer | string =
+          isHtml && assetBase ? stampAssetVersions(new TextDecoder().decode(body), assetBase, cacheBust) : body
+        await this.env.PROD.put(key, putBody, {
+          httpMetadata: { contentType: mime },
         })
         uploaded += 1
         uploadedBytes += body.byteLength
