@@ -4,16 +4,32 @@ import { logger } from "./log"
 
 type Turn = { role: "user" | "assistant"; text: string; time?: number }
 
-// Append/replace a `?v=<ver>` cache-buster on every reference to a specific
-// asset base inside an HTML string. The draft is served from a CDN that caches
-// by URL, so an edited style.css/img would otherwise stay stale at its
-// unchanged URL; bumping `?v=` each turn changes the URL -> guaranteed fresh.
-// Matches the base + path in href/src/srcset and inline url(...), and drops any
-// existing query so re-stamping every turn replaces rather than stacks.
-function stampAssetVersions(html: string, assetBase: string, ver: string): string {
+// Short content hash (8 hex) of a file's bytes — the per-asset cache-buster
+// (?v=). crypto.subtle.digest is native/fast and runs on bytes already held in
+// memory during the sync, so it adds no meaningful memory or latency.
+async function contentHash8(buf: ArrayBuffer): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", buf)
+  return Array.from(new Uint8Array(digest).slice(0, 4))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("")
+}
+
+// Stamp `?v=<contentHash>` onto every reference to the variant's draft assets
+// inside an HTML string, where the hash is of THAT asset's content. The draft
+// is served from a CDN that caches by URL, so a stable URL serves a stale edited
+// asset. Hashing per asset means the URL changes only when the asset's bytes
+// change: the cache busts exactly when needed, unchanged assets stay cached, and
+// a no-op turn yields byte-identical HTML (so git sees no diff -> no spurious
+// version). `hashByPath` maps each draft-relative path to its hash; refs to
+// assets not in the workspace are left unversioned. Drops any existing query so
+// re-stamping replaces rather than stacks.
+function stampAssetVersions(html: string, assetBase: string, hashByPath: Map<string, string>): string {
   const esc = assetBase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-  const re = new RegExp(`(${esc}[^"'?\\s)>]+)(\\?[^"'\\s)>]*)?`, "g")
-  return html.replace(re, (_m, path) => `${path}?v=${ver}`)
+  const re = new RegExp(`(${esc})([^"'?\\s)>]+)(\\?[^"'\\s)>]*)?`, "g")
+  return html.replace(re, (_m, base, path) => {
+    const v = hashByPath.get(path)
+    return v ? `${base}${path}?v=${v}` : `${base}${path}`
+  })
 }
 
 export class OpenCodeSession extends Container<Env> {
@@ -573,10 +589,9 @@ export class OpenCodeSession extends Container<Env> {
       return
     }
 
-    // One cache-buster per sync, stamped onto this variant's draft asset refs
-    // inside HTML (see stampAssetVersions). assetBase = the public CDN URL for
-    // this draft, e.g. https://static.ll-assets.com/variants/unpublished/<id>/.
-    const cacheBust = crypto.randomUUID().slice(0, 8)
+    // assetBase = the public CDN URL for this draft, e.g.
+    // https://static.ll-assets.com/variants/unpublished/<id>/. Asset refs in
+    // HTML get a per-asset content-hash ?v= (see stampAssetVersions).
     const publicBase = (this.env.R2_PUBLIC_BASE ?? "").replace(/\/+$/, "")
     const assetBase = publicBase ? `${publicBase}/${prefix}` : null
 
@@ -584,6 +599,14 @@ export class OpenCodeSession extends Container<Env> {
     let uploadedBytes = 0
     let fetchFailed = 0
     const seen = new Set<string>()
+    // Per-asset content hashes (draft-relative path -> 8-hex), built in pass 1.
+    const hashByPath = new Map<string, string>()
+    // HTML is deferred to pass 2: its ?v= stamps reference OTHER assets' hashes,
+    // which aren't all known until every file has been fetched + hashed.
+    const htmlPending: { key: string; body: ArrayBuffer; mime: string }[] = []
+
+    // Pass 1: fetch every file, hash it, upload non-HTML immediately (freeing
+    // its bytes), hold HTML for pass 2.
     await Promise.all(
       files.map(async (rel) => {
         const fileRes = await this.containerFetch(
@@ -605,25 +628,33 @@ export class OpenCodeSession extends Container<Env> {
           logger.warn("r2.sync.out.unsafePath.skip", { sessionId: this.sessionId, rel })
           return
         }
-        seen.add(key)
         const body = await fileRes.arrayBuffer()
         // Forward the container's Content-Type (Bun.file infers from extension)
         // so SVGs, HTML, CSS, JS, images etc. are served with the right MIME
         // when fetched from R2 via a public URL. Without this, browsers render
         // SVGs as text and treat HTML as application/octet-stream.
         const mime = (fileRes.headers.get("content-type") ?? "application/octet-stream").split(";")[0].trim()
-        // For HTML, stamp a fresh ?v= onto draft asset refs so an edited
-        // style.css/image can't be served stale from the CDN's URL cache.
+        hashByPath.set(rel, await contentHash8(body))
+        seen.add(key)
         const isHtml = mime === "text/html" || rel.toLowerCase().endsWith(".html")
-        const putBody: ArrayBuffer | string =
-          isHtml && assetBase ? stampAssetVersions(new TextDecoder().decode(body), assetBase, cacheBust) : body
-        await this.env.PROD.put(key, putBody, {
-          httpMetadata: { contentType: mime },
-        })
+        if (isHtml && assetBase) {
+          htmlPending.push({ key, body, mime })
+          return
+        }
+        await this.env.PROD.put(key, body, { httpMetadata: { contentType: mime } })
         uploaded += 1
         uploadedBytes += body.byteLength
       }),
     )
+
+    // Pass 2: now that every asset is hashed, stamp the deferred HTML with
+    // per-asset content-hash ?v= and upload it.
+    for (const h of htmlPending) {
+      const stamped = stampAssetVersions(new TextDecoder().decode(h.body), assetBase as string, hashByPath)
+      await this.env.PROD.put(h.key, stamped, { httpMetadata: { contentType: h.mime } })
+      uploaded += 1
+      uploadedBytes += h.body.byteLength
+    }
 
     // Don't prune if more than half the fetches failed — a flaky sidecar
     // shouldn't delete draft files it simply couldn't read this pass.
