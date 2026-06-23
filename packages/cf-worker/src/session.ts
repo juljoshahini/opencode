@@ -4,9 +4,6 @@ import { logger } from "./log"
 
 type Turn = { role: "user" | "assistant"; text: string; time?: number }
 
-// Short content hash (8 hex) of a file's bytes — the per-asset cache-buster
-// (?v=). crypto.subtle.digest is native/fast and runs on bytes already held in
-// memory during the sync, so it adds no meaningful memory or latency.
 async function contentHash8(buf: ArrayBuffer): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", buf)
   return Array.from(new Uint8Array(digest).slice(0, 4))
@@ -14,15 +11,6 @@ async function contentHash8(buf: ArrayBuffer): Promise<string> {
     .join("")
 }
 
-// Stamp `?v=<contentHash>` onto every reference to the variant's draft assets
-// inside an HTML string, where the hash is of THAT asset's content. The draft
-// is served from a CDN that caches by URL, so a stable URL serves a stale edited
-// asset. Hashing per asset means the URL changes only when the asset's bytes
-// change: the cache busts exactly when needed, unchanged assets stay cached, and
-// a no-op turn yields byte-identical HTML (so git sees no diff -> no spurious
-// version). `hashByPath` maps each draft-relative path to its hash; refs to
-// assets not in the workspace are left unversioned. Drops any existing query so
-// re-stamping replaces rather than stacks.
 function stampAssetVersions(html: string, assetBase: string, hashByPath: Map<string, string>): string {
   const esc = assetBase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
   const re = new RegExp(`(${esc})([^"'?\\s)>]+)(\\?[^"'\\s)>]*)?`, "g")
@@ -589,9 +577,6 @@ export class OpenCodeSession extends Container<Env> {
       return
     }
 
-    // assetBase = the public CDN URL for this draft, e.g.
-    // https://static.ll-assets.com/variants/unpublished/<id>/. Asset refs in
-    // HTML get a per-asset content-hash ?v= (see stampAssetVersions).
     const publicBase = (this.env.R2_PUBLIC_BASE ?? "").replace(/\/+$/, "")
     const assetBase = publicBase ? `${publicBase}/${prefix}` : null
 
@@ -599,14 +584,9 @@ export class OpenCodeSession extends Container<Env> {
     let uploadedBytes = 0
     let fetchFailed = 0
     const seen = new Set<string>()
-    // Per-asset content hashes (draft-relative path -> 8-hex), built in pass 1.
     const hashByPath = new Map<string, string>()
-    // HTML is deferred to pass 2: its ?v= stamps reference OTHER assets' hashes,
-    // which aren't all known until every file has been fetched + hashed.
     const htmlPending: { key: string; body: ArrayBuffer; mime: string }[] = []
 
-    // Pass 1: fetch every file, hash it, upload non-HTML immediately (freeing
-    // its bytes), hold HTML for pass 2.
     await Promise.all(
       files.map(async (rel) => {
         const fileRes = await this.containerFetch(
@@ -647,8 +627,6 @@ export class OpenCodeSession extends Container<Env> {
       }),
     )
 
-    // Pass 2: now that every asset is hashed, stamp the deferred HTML with
-    // per-asset content-hash ?v= and upload it.
     for (const h of htmlPending) {
       const stamped = stampAssetVersions(new TextDecoder().decode(h.body), assetBase as string, hashByPath)
       await this.env.PROD.put(h.key, stamped, { httpMetadata: { contentType: h.mime } })
