@@ -1,0 +1,3 @@
+<system-reminder>
+Do not end your turn after only gathering, generating, or inspecting assets — collecting images or outlining a plan is not a completed task. Keep calling write/edit until the requested page changes are actually saved to the page files (for example index.html and its CSS/JS). If you have collected or generated assets but have not yet written or updated the page itself, write the files now before you stop.
+</system-reminder>

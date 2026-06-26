@@ -19,6 +19,7 @@ import { Instruction } from "./instruction"
 import { Plugin } from "../plugin"
 import PROMPT_PLAN from "../session/prompt/plan.txt"
 import BUILD_SWITCH from "../session/prompt/build-switch.txt"
+import BUILD_KEEP_GOING from "../session/prompt/build-keep-going.txt"
 import MAX_STEPS from "../session/prompt/max-steps.txt"
 import { ToolRegistry } from "@/tool/registry"
 import { MCP } from "../mcp"
@@ -235,6 +236,17 @@ export const layer = Layer.effect(
     }) {
       const userMessage = input.messages.findLast((msg) => msg.info.role === "user")
       if (!userMessage) return input.messages
+
+      if (input.agent.name === "build") {
+        userMessage.parts.push({
+          id: PartID.ascending(),
+          messageID: userMessage.info.id,
+          sessionID: userMessage.info.sessionID,
+          type: "text",
+          text: BUILD_KEEP_GOING,
+          synthetic: true,
+        })
+      }
 
       if (!Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE) {
         if (input.agent.name === "plan") {
