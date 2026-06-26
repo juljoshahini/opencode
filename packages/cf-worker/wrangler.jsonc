@@ -12,7 +12,7 @@
     // Base URL of the LanderLab backend agent API. The settings_get /
     // settings_update tools call ${LANDERLAB_API_BASE}/agent/settings with the
     // per-turn agent JWT. Must include the /api/v2 base path.
-    "LANDERLAB_API_BASE": "https://backend-v2-test.landerlab.workers.dev/api/v2",
+    "LANDERLAB_API_BASE": "https://backend-v2.landerlab.workers.dev/api/v2",
     // Public asset CDN host for the landerlab-prod bucket (where the draft
     // workspace lives). Assets are referenced in the page (and chat thumbnails)
     // as ${R2_PUBLIC_BASE}/variants/unpublished/<encId>/<relPath>. NOTE: if an
