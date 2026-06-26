@@ -166,7 +166,7 @@ export async function promptAsync(sessionID: string, input: PromptInput): Promis
           variant: input.model.variant ?? input.variant,
         }
       : undefined,
-    variant: input.variant,
+    variant: input.variant ?? input.model?.variant,
     system: input.system,
     parts: [...attachmentParts, { type: "text", text: input.prompt }],
   }

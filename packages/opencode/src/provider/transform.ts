@@ -594,7 +594,7 @@ function openaiCompatibleReasoningEfforts(id: string) {
 }
 
 function anthropicAdaptiveEfforts(apiId: string): string[] | null {
-  if (["opus-4-7", "opus-4.7"].some((v) => apiId.includes(v))) {
+  if (["opus-4-7", "opus-4.7", "opus-4-8", "opus-4.8"].some((v) => apiId.includes(v))) {
     return ["low", "medium", "high", "xhigh", "max"]
   }
   if (["opus-4-6", "opus-4.6", "sonnet-4-6", "sonnet-4.6"].some((v) => apiId.includes(v))) {
@@ -693,6 +693,9 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
               {
                 thinking: {
                   type: "adaptive",
+                  ...(["opus-4-7", "opus-4.7", "opus-4-8", "opus-4.8"].some((v) => model.api.id.includes(v))
+                    ? { display: "summarized" }
+                    : {}),
                 },
                 effort,
               },
@@ -732,17 +735,24 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
           }
         }
         return Object.fromEntries(
-          ["low", "high"].map((effort) => [
+          googleThinkingLevelEfforts(id).map((effort) => [
             effort,
             {
-              includeThoughts: true,
-              thinkingLevel: effort,
+              thinkingConfig: {
+                includeThoughts: true,
+                thinkingLevel: effort,
+              },
             },
           ]),
         )
       }
       return Object.fromEntries(
-        openaiCompatibleReasoningEfforts(model.api.id).map((effort) => [effort, { reasoningEffort: effort }]),
+        openaiCompatibleReasoningEfforts(model.api.id).map((effort) => [
+          effort,
+          model.api.id.startsWith("openai/")
+            ? { reasoningEffort: effort, reasoningSummary: "auto" }
+            : { reasoningEffort: effort },
+        ]),
       )
 
     case "@ai-sdk/github-copilot":
