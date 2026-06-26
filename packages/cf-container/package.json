@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@silvia-odwyer/photon-node": "0.3.4"
+    "sharp": "^0.33.5"
   },
   "devDependencies": {
     "@types/bun": "catalog:",

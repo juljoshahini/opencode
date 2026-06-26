@@ -50,8 +50,9 @@ COPY packages/cf-container/package.json ./package.json
 COPY packages/cf-container/tsconfig.json ./tsconfig.json
 COPY packages/cf-container/src ./src
 
-# Sidecar deps (photon-node WASM for image resizing). --production skips devDeps,
-# --ignore-scripts skips native postinstalls we don't need for the HTTP sidecar.
+# Sidecar deps (sharp/libvips for image resizing; prebuilt glibc binary ships as
+# an optional dependency, so no postinstall is needed). --production skips
+# devDeps, --ignore-scripts skips native postinstalls we don't need.
 RUN bun install --production --ignore-scripts
 
 RUN mkdir -p /workspace
