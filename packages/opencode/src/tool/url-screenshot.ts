@@ -1,6 +1,7 @@
 import { Effect, Schema } from "effect"
 import * as Tool from "./tool"
 import DESCRIPTION from "./url-screenshot.txt"
+import { MAX_ATTACHMENT_BYTES } from "@/util/media"
 
 const DEFAULT_TIMEOUT = 120 * 1000
 
@@ -46,20 +47,21 @@ export const UrlScreenshotTool = Tool.define(
             metadata: { url: params.url },
           })
 
-          // Cap viewport.width and force deviceScaleFactor 0.5 so a fullPage
-          // capture of a long landing page (often 10000-15000 CSS px tall)
-          // stays under Anthropic's 8000-pixel image-dimension limit. JPEG
-          // q75 keeps the base64 payload well under 5 MB for the same reason.
+          const HARD_MAX_OUTPUT_PX = 7000
+          const DSF = 0.5
+          const MAX_CLIP_HEIGHT = Math.floor(HARD_MAX_OUTPUT_PX / DSF)
+          const vpWidth = Math.min(params.viewportWidth ?? 1280, 1280)
+          const wantsFullPage = params.fullPage ?? false
           const endpoint = `https://api.cloudflare.com/client/v4/accounts/${accountId}/browser-rendering/screenshot`
           const body = {
             url: params.url,
             viewport: {
-              width: Math.min(params.viewportWidth ?? 1280, 1280),
+              width: vpWidth,
               height: params.viewportHeight ?? 800,
-              deviceScaleFactor: 0.5,
+              deviceScaleFactor: DSF,
             },
             screenshotOptions: {
-              fullPage: params.fullPage ?? false,
+              ...(wantsFullPage ? { clip: { x: 0, y: 0, width: vpWidth, height: MAX_CLIP_HEIGHT } } : {}),
               type: "jpeg",
               quality: 75,
             },
@@ -90,24 +92,28 @@ export const UrlScreenshotTool = Tool.define(
           const contentType = (res.headers.get("content-type") ?? "image/png").split(";")[0].toLowerCase()
           const buf = yield* Effect.promise(() => res.arrayBuffer())
           const bytes = Buffer.from(buf)
+          const tooLarge = bytes.byteLength > MAX_ATTACHMENT_BYTES
           const dataUrl = `data:${contentType};base64,${bytes.toString("base64")}`
 
           return {
             title: `Screenshot of ${params.url}`,
-            output: [
-              `Captured ${params.url} at ${body.viewport.width}x${body.viewport.height}${body.screenshotOptions.fullPage ? " (full page)" : ""}.`,
-              `Returned ${bytes.byteLength} bytes of ${contentType}.`,
-              `The screenshot is attached for your inspection. It is NOT saved to /workspace — examine it for design cues and write matching HTML/CSS.`,
-            ].join("\n"),
+            output: tooLarge
+              ? `Captured ${params.url} but the screenshot (${bytes.byteLength} bytes) is too large to attach. Retry without fullPage or with a smaller viewport.`
+              : [
+                  `Captured ${params.url} at ${body.viewport.width}x${body.viewport.height}${wantsFullPage ? ` (bounded to the top ${MAX_CLIP_HEIGHT} CSS px)` : ""}.`,
+                  `Returned ${bytes.byteLength} bytes of ${contentType}.`,
+                  `The screenshot is attached for your inspection. It is NOT saved to /workspace — examine it for design cues and write matching HTML/CSS.`,
+                ].join("\n"),
             metadata: {
               url: params.url,
               viewportWidth: body.viewport.width,
               viewportHeight: body.viewport.height,
-              fullPage: body.screenshotOptions.fullPage,
+              fullPage: wantsFullPage,
               mime: contentType,
               bytes: bytes.byteLength,
+              omitted: tooLarge,
             },
-            attachments: [{ type: "file" as const, mime: contentType, url: dataUrl }],
+            ...(tooLarge ? {} : { attachments: [{ type: "file" as const, mime: contentType, url: dataUrl }] }),
           }
         }).pipe(Effect.orDie),
     }

@@ -18,7 +18,14 @@ import { MessageTable, PartTable, SessionTable } from "./session.sql"
 import * as ProviderError from "@/provider/error"
 import { iife } from "@/util/iife"
 import { errorMessage } from "@/util/error"
-import { isMedia } from "@/util/media"
+import {
+  isMedia,
+  isImageAttachment,
+  base64BytesFromDataUrl,
+  imageDimensionsFromDataUrl,
+  MAX_IMAGE_EDGE,
+  MAX_ATTACHMENT_BYTES,
+} from "@/util/media"
 import type { SystemError } from "bun"
 import type { Provider } from "@/provider/provider"
 import { ModelID, ProviderID } from "@/provider/schema"
@@ -37,6 +44,19 @@ interface FetchDecompressionError extends Error {
 
 export const SYNTHETIC_ATTACHMENT_PROMPT = "Attached media from tool result:"
 export { isMedia }
+
+function sanitizeAttachment(att: { mime: string; url: string; filename?: string }):
+  | { kind: "keep" }
+  | { kind: "drop"; placeholder: string } {
+  if (!att.url.startsWith("data:") || !isImageAttachment(att.mime)) return { kind: "keep" }
+  const bytes = base64BytesFromDataUrl(att.url)
+  const dims = imageDimensionsFromDataUrl(att.url)
+  const tooManyBytes = bytes !== undefined && bytes > MAX_ATTACHMENT_BYTES
+  const tooLarge = dims !== undefined && (dims.width > MAX_IMAGE_EDGE || dims.height > MAX_IMAGE_EDGE)
+  if (!tooManyBytes && !tooLarge) return { kind: "keep" }
+  const detail = dims ? `${dims.width}x${dims.height}` : bytes !== undefined ? `${Math.round(bytes / 1024)}KB` : "oversized"
+  return { kind: "drop", placeholder: `[Oversized image omitted: ${att.mime}, ${detail}, exceeds model limit]` }
+}
 
 export const OutputLengthError = namedSchemaError("MessageOutputLengthError", {})
 export const AbortedError = namedSchemaError("MessageAbortedError", { message: Schema.String })
@@ -771,7 +791,9 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
         attachments?: Array<{ mime: string; url: string }>
       }
       const attachments = (outputObject.attachments ?? []).filter((attachment) => {
-        return attachment.url.startsWith("data:") && attachment.url.includes(",")
+        return (
+          attachment.url.startsWith("data:") && attachment.url.includes(",") && sanitizeAttachment(attachment).kind === "keep"
+        )
       })
 
       return {
@@ -817,12 +839,17 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
               text: `[Attached ${part.mime}: ${part.filename ?? "file"}]`,
             })
           } else {
-            userMessage.parts.push({
-              type: "file",
-              url: part.url,
-              mediaType: part.mime,
-              filename: part.filename,
-            })
+            const sanitized = sanitizeAttachment({ mime: part.mime, url: part.url, filename: part.filename })
+            if (sanitized.kind === "drop") {
+              userMessage.parts.push({ type: "text", text: sanitized.placeholder })
+            } else {
+              userMessage.parts.push({
+                type: "file",
+                url: part.url,
+                mediaType: part.mime,
+                filename: part.filename,
+              })
+            }
           }
         }
 
@@ -894,7 +921,17 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
             const outputText = part.state.time.compacted
               ? "[Old tool result content cleared]"
               : truncateToolOutput(part.state.output, options?.toolOutputMaxChars)
-            const attachments = part.state.time.compacted || options?.stripMedia ? [] : (part.state.attachments ?? [])
+            const rawAttachments = part.state.time.compacted || options?.stripMedia ? [] : (part.state.attachments ?? [])
+            const droppedNotes: string[] = []
+            const attachments = rawAttachments.filter((a) => {
+              const sanitized = sanitizeAttachment({ mime: a.mime, url: a.url, filename: a.filename })
+              if (sanitized.kind === "drop") {
+                droppedNotes.push(sanitized.placeholder)
+                return false
+              }
+              return true
+            })
+            const outputTextWithNotes = droppedNotes.length > 0 ? [outputText, ...droppedNotes].join("\n") : outputText
 
             // For providers that don't support media in tool results, extract media files
             // (images, PDFs) to be sent as a separate user message
@@ -908,10 +945,10 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
             const output =
               finalAttachments.length > 0
                 ? {
-                    text: outputText,
+                    text: outputTextWithNotes,
                     attachments: finalAttachments,
                   }
-                : outputText
+                : outputTextWithNotes
 
             assistantMessage.parts.push({
               type: ("tool-" + part.tool) as `tool-${string}`,
