@@ -400,8 +400,12 @@ export class OpenCodeSession extends Container<Env> {
       return
     }
     const bundle = (await res.json()) as { db?: string; wal?: string; shm?: string }
-    if (!bundle.db && !bundle.wal && !bundle.shm) {
-      logger.info("state.dump.empty", { sessionId: this.sessionId })
+    if (!bundle.db) {
+      logger.info("state.dump.noDb.skip", {
+        sessionId: this.sessionId,
+        wal: bundle.wal?.length ?? 0,
+        shm: bundle.shm?.length ?? 0,
+      })
       return
     }
     await this.env.FILES.put(stateKeyFor(this.sessionId), JSON.stringify(bundle), {

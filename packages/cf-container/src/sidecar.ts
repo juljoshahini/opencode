@@ -1,4 +1,6 @@
 import fs from "node:fs/promises"
+import { existsSync } from "node:fs"
+import { Database } from "bun:sqlite"
 import path from "node:path"
 import crypto from "node:crypto"
 import { WORKSPACE, resolveSafe, relTo, PathError } from "./paths"
@@ -404,6 +406,8 @@ ${renderTranscript(body.priorTranscript)}`
         })
 
       let idle = false
+      let filesChanged = false
+      const FILE_TOOLS = new Set(["write", "edit", "delete", "apply_patch", "image_generate", "image_use"])
       let lastRealEventAt = Date.now()
       let heartbeatCount = 0
       let realEventCount = 0
@@ -474,9 +478,11 @@ ${renderTranscript(body.priorTranscript)}`
                   heartbeatsBefore: heartbeatCount,
                 })
               }
+              if (event.type === "file.edited") filesChanged = true
               if (event.type === "message.part.updated") {
                 const part = event.properties?.part as { type?: string; tool?: string; state?: { status?: string } } | undefined
                 if (part?.type === "tool" && part.state?.status === "completed") {
+                  if (FILE_TOOLS.has(part.tool ?? "")) filesChanged = true
                   log.info("tool.observed", {
                     runId,
                     opencodeSessionId: sessionID,
@@ -537,7 +543,7 @@ ${renderTranscript(body.priorTranscript)}`
       }
 
       await promptPromise
-      await sse(writer, "done", { sessionId: sessionID })
+      await sse(writer, "done", { sessionId: sessionID, filesChanged })
       log.info("prompt.done", {
         runId,
         opencodeSessionId: sessionID,
@@ -545,6 +551,7 @@ ${renderTranscript(body.priorTranscript)}`
         realEventsReceived: realEventCount,
         heartbeatsReceived: heartbeatCount,
         userPartsDropped,
+        filesChanged,
         aborted: abort.signal.aborted,
       })
     } catch (e) {
@@ -634,16 +641,30 @@ async function handleStateRestore(req: Request): Promise<Response> {
 }
 
 async function handleStateDump(): Promise<Response> {
-  const [db, wal, shm] = await Promise.all([
-    readFileBase64(STATE_DB),
-    readFileBase64(STATE_DB_WAL),
-    readFileBase64(STATE_DB_SHM),
-  ])
+  if (!existsSync(STATE_DB)) {
+    log.info("state.dumped", { db: 0, wal: 0, shm: 0 })
+    return json({})
+  }
+  let truncated = false
+  try {
+    const sqlite = new Database(STATE_DB)
+    const rows = sqlite.query("PRAGMA wal_checkpoint(TRUNCATE);").all() as Array<{ busy?: number }>
+    truncated = rows.length > 0 && Number(rows[0]?.busy ?? 1) === 0
+    sqlite.close()
+  } catch (e) {
+    log.warn("state.checkpoint.failed", { error: String(e) })
+  }
+  const db = await readFileBase64(STATE_DB)
   const bundle: StateBundle = {}
   if (db !== undefined) bundle.db = db
-  if (wal !== undefined) bundle.wal = wal
-  if (shm !== undefined) bundle.shm = shm
+  if (!truncated) {
+    const wal = await readFileBase64(STATE_DB_WAL)
+    const shm = await readFileBase64(STATE_DB_SHM)
+    if (wal !== undefined) bundle.wal = wal
+    if (shm !== undefined) bundle.shm = shm
+  }
   log.info("state.dumped", {
+    truncated,
     db: bundle.db ? Buffer.from(bundle.db, "base64").byteLength : 0,
     wal: bundle.wal ? Buffer.from(bundle.wal, "base64").byteLength : 0,
     shm: bundle.shm ? Buffer.from(bundle.shm, "base64").byteLength : 0,
