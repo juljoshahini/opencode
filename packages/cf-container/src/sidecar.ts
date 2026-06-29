@@ -30,6 +30,13 @@ let lastRequestAt: number | null = null
 let lastRequestPath: string | null = null
 let activeOpencodeSession: string | null = null
 let activeRunStartedAt: number | null = null
+let lastRunResult: {
+  opencodeSessionId: string
+  filesChanged: boolean
+  settingsChanged: boolean
+  finishReason: string
+  at: number
+} | null = null
 
 const PORT = Number(process.env.SIDECAR_PORT ?? 8080)
 const TOKEN = process.env.SIDECAR_TOKEN
@@ -390,6 +397,9 @@ ${renderTranscript(body.priorTranscript)}`
   activeRunStartedAt = Date.now()
 
   const work = (async () => {
+    let filesChanged = false
+    let settingsChanged = false
+    let finishReason = "stop"
     try {
       await sse(writer, "session", { id: sessionID })
 
@@ -425,7 +435,6 @@ ${renderTranscript(body.priorTranscript)}`
         })
 
       let idle = false
-      let filesChanged = false
       const FILE_TOOLS = new Set(["write", "edit", "delete", "apply_patch", "image_generate", "image_use"])
       let lastRealEventAt = Date.now()
       let heartbeatCount = 0
@@ -502,6 +511,7 @@ ${renderTranscript(body.priorTranscript)}`
                 const part = event.properties?.part as { type?: string; tool?: string; state?: { status?: string } } | undefined
                 if (part?.type === "tool" && part.state?.status === "completed") {
                   if (FILE_TOOLS.has(part.tool ?? "")) filesChanged = true
+                  if (part.tool === "settings_update") settingsChanged = true
                   log.info("tool.observed", {
                     runId,
                     opencodeSessionId: sessionID,
@@ -562,7 +572,7 @@ ${renderTranscript(body.priorTranscript)}`
       }
 
       await promptPromise
-      await sse(writer, "done", { sessionId: sessionID, filesChanged })
+      await sse(writer, "done", { sessionId: sessionID, filesChanged, settingsChanged })
       log.info("prompt.done", {
         runId,
         opencodeSessionId: sessionID,
@@ -574,11 +584,13 @@ ${renderTranscript(body.priorTranscript)}`
         aborted: abort.signal.aborted,
       })
     } catch (e) {
+      finishReason = "error"
       log.error("prompt.crash", { runId, opencodeSessionId: sessionID, error: String(e) })
       try {
         await sse(writer, "error", { message: String(e) })
       } catch {}
     } finally {
+      lastRunResult = { opencodeSessionId: sessionID, filesChanged, settingsChanged, finishReason, at: Date.now() }
       try {
         await writer.close()
       } catch {}
@@ -801,6 +813,7 @@ async function handleRequest(req: Request, url: URL): Promise<Response> {
         active: activeOpencodeSession !== null,
         opencodeSessionId: activeOpencodeSession,
         runMs: activeRunStartedAt ? Date.now() - activeRunStartedAt : null,
+        lastResult: lastRunResult,
       })
     }
 

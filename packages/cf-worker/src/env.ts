@@ -30,6 +30,12 @@ export interface Env {
   // "https://preview.landerlabpages.com". The DO builds the agent's
   // per-variant preview URL as `${LANDERLAB_PREVIEW_BASE}/variants/<encId>`.
   LANDERLAB_PREVIEW_BASE?: string
+  // Shared secret for the DO -> backend turn-complete callback. The DO POSTs
+  // ${LANDERLAB_API_BASE}/internal/turn-complete with this in x-callback-secret
+  // when a turn finishes (even after client disconnect) so the backend can
+  // finalize the assistant chat row + version snapshot independently of the
+  // client request.
+  LANDERLAB_CALLBACK_SECRET?: string
 }
 
 export const PROVIDER_VARS = [
