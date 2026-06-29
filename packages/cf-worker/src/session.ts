@@ -154,6 +154,12 @@ export class OpenCodeSession extends Container<Env> {
     }
     const body = JSON.stringify(parsed)
 
+    // The backend's chat-message id for this turn. When present it lets the DO
+    // call the backend's turn-complete endpoint so the assistant row + version
+    // snapshot get finalized even if the client disconnected (background
+    // completion). Absent on older backends -> notifyTurnComplete is a no-op.
+    const assistantMessageId = typeof parsed.assistantMessageId === "string" ? parsed.assistantMessageId : undefined
+
     logger.info("container.fetch.start", { runId, sessionId })
     const upstream = await this.containerFetch(
       new Request("http://container/prompt", {
@@ -257,14 +263,37 @@ export class OpenCodeSession extends Container<Env> {
 
         if (!sawDone && textBuffer.includes("event: done")) {
           sawDone = true
+          let fc = false
+          let sc = false
+          const m = textBuffer.match(/event: done\s*\ndata: (\{[^\n]*\})/)
+          if (m) {
+            try {
+              const d = JSON.parse(m[1]) as { filesChanged?: boolean; settingsChanged?: boolean }
+              fc = Boolean(d.filesChanged)
+              sc = Boolean(d.settingsChanged)
+            } catch {}
+          }
           logger.info("stream.doneEvent", {
             runId,
             sessionId,
             streamedBytes,
             streamedChunks,
+            filesChanged: fc,
+            settingsChanged: sc,
             ms: Date.now() - tStreamStart,
           })
           sessionState.ctx.waitUntil(sessionState.finalizeRun(opencodeSessionForSync).catch(() => {}))
+          sessionState.ctx.waitUntil(
+            sessionState
+              .notifyTurnComplete({
+                assistantMessageId,
+                opencodeSessionId: opencodeSessionForSync,
+                filesChanged: fc,
+                settingsChanged: sc,
+                finishReason: "stop",
+              })
+              .catch(() => {}),
+          )
         }
       },
       cancel(reason) {
@@ -290,7 +319,9 @@ export class OpenCodeSession extends Container<Env> {
         // alive, polls until the run ends, then takes the real final snapshot.
         if (!sawDone && opencodeSessionForSync) {
           sawDone = true
-          sessionState.ctx.waitUntil(sessionState.finalizeOrphanedRun(runId, opencodeSessionForSync).catch(() => {}))
+          sessionState.ctx.waitUntil(
+            sessionState.finalizeOrphanedRun(runId, opencodeSessionForSync, assistantMessageId).catch(() => {}),
+          )
         }
       },
     })
@@ -316,12 +347,23 @@ export class OpenCodeSession extends Container<Env> {
   // (in case the container dies), then keep the container alive and poll the
   // sidecar until the run actually completes, then snapshot again — that
   // final snapshot is the one that contains the full turn.
-  private async finalizeOrphanedRun(runId: string, opencodeSessionId: string | null): Promise<void> {
+  private async finalizeOrphanedRun(
+    runId: string,
+    opencodeSessionId: string | null,
+    assistantMessageId?: string,
+  ): Promise<void> {
     const t0 = Date.now()
     const MAX_WAIT_MS = 5 * 60_000
     const POLL_MS = 10_000
 
     await this.finalizeRun(opencodeSessionId).catch(() => {})
+
+    type RunActive = {
+      active?: boolean
+      runMs?: number | null
+      lastResult?: { filesChanged?: boolean; settingsChanged?: boolean; finishReason?: string } | null
+    }
+    let lastResult: RunActive["lastResult"] = null
 
     while (Date.now() - t0 < MAX_WAIT_MS) {
       this.renewActivityTimeout()
@@ -339,8 +381,9 @@ export class OpenCodeSession extends Container<Env> {
           logger.warn("orphan.poll.failed", { runId, sessionId: this.sessionId, status: res.status })
           break
         }
-        const body = (await res.json()) as { active?: boolean; runMs?: number | null }
+        const body = (await res.json()) as RunActive
         active = Boolean(body.active)
+        if (body.lastResult) lastResult = body.lastResult
       } catch (e) {
         logger.warn("orphan.poll.threw", { runId, sessionId: this.sessionId, error: String(e) })
         break
@@ -353,6 +396,13 @@ export class OpenCodeSession extends Container<Env> {
           waitedMs: Date.now() - t0,
         })
         await this.finalizeRun(opencodeSessionId).catch(() => {})
+        await this.notifyTurnComplete({
+          assistantMessageId,
+          opencodeSessionId,
+          filesChanged: Boolean(lastResult?.filesChanged),
+          settingsChanged: Boolean(lastResult?.settingsChanged),
+          finishReason: lastResult?.finishReason ?? "stop",
+        }).catch(() => {})
         return
       }
     }
@@ -365,6 +415,63 @@ export class OpenCodeSession extends Container<Env> {
     })
     // Last-resort snapshot — better partial than nothing.
     await this.finalizeRun(opencodeSessionId).catch(() => {})
+    await this.notifyTurnComplete({
+      assistantMessageId,
+      opencodeSessionId,
+      filesChanged: Boolean(lastResult?.filesChanged),
+      settingsChanged: Boolean(lastResult?.settingsChanged),
+      finishReason: lastResult?.finishReason ?? "timeout",
+    }).catch(() => {})
+  }
+
+  // Fire-and-forget callback to the backend so the assistant chat row + version
+  // snapshot get finalized even when the client disconnected (the live stream
+  // that normally drives the backend's onFinish is gone). The backend endpoint
+  // is idempotent — it only finalizes a row still in the 'generating' state, so
+  // firing this on the happy path too (where onFinish already ran) is harmless.
+  // No-op unless the backend threaded an assistantMessageId AND the callback
+  // base + secret are configured.
+  private async notifyTurnComplete(opts: {
+    assistantMessageId?: string
+    opencodeSessionId: string | null
+    filesChanged: boolean
+    settingsChanged: boolean
+    finishReason: string
+  }): Promise<void> {
+    if (!opts.assistantMessageId) return
+    const base = this.env.LANDERLAB_API_BASE
+    const secret = this.env.LANDERLAB_CALLBACK_SECRET
+    if (!base || !secret) {
+      logger.warn("turnComplete.noConfig", {
+        sessionId: this.sessionId,
+        hasBase: Boolean(base),
+        hasSecret: Boolean(secret),
+      })
+      return
+    }
+    try {
+      const res = await fetch(`${base.replace(/\/+$/, "")}/internal/turn-complete`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-callback-secret": secret },
+        body: JSON.stringify({
+          sessionId: this.sessionId,
+          opencodeSessionId: opts.opencodeSessionId,
+          assistantMessageId: opts.assistantMessageId,
+          filesChanged: opts.filesChanged,
+          settingsChanged: opts.settingsChanged,
+          finishReason: opts.finishReason,
+        }),
+      })
+      logger.info("turnComplete.sent", {
+        sessionId: this.sessionId,
+        assistantMessageId: opts.assistantMessageId,
+        status: res.status,
+        filesChanged: opts.filesChanged,
+        settingsChanged: opts.settingsChanged,
+      })
+    } catch (e) {
+      logger.error("turnComplete.failed", { sessionId: this.sessionId, error: String(e) })
+    }
   }
 
   private async finalizeRun(opencodeSessionId: string | null): Promise<void> {
