@@ -1,0 +1,406 @@
+# Popup Component — AI Authoring Guide
+
+> **Audience:** LLMs generating popup HTML + scoped CSS from a user brief.
+> **Environment:** `styles.css` and `script.js` are already loaded. Output HTML and optionally a scoped `<style>` block. Never output `<script>` (except the custom-trigger pattern in §9) or `<link>` tags. Never modify global CSS.
+
+---
+
+## 1. Output contract
+
+You output:
+
+1. **One HTML block** rooted at `<div data-popup-el="root" …>` with a unique kebab-case `id` and the **complete attribute set from §8** (never abbreviate — include every attribute with its default when the user didn't specify one).
+2. **Optionally one `<style>` block** — every rule prefixed with `#<id>`.
+3. **Optionally an opener** — link (§7a) or button (§7c).
+4. **Optionally a closer link** placed **inside** the popup box (§7b).
+
+---
+
+## 2. Anatomy
+
+```
+root       fullscreen overlay — DO NOT restyle; set --popup-* vars only
+├─ backdrop    tint layer — change bg/blur via vars; toggle via attribute
+└─ box         INVISIBLE positioning/animation wrapper — do not style at all
+   ├─ close      dismiss X — sibling of content so it stays put while content scrolls
+   └─ content    THE VISIBLE CARD — all styling + all user content goes here
+```
+
+Identify each layer via `data-popup-el="root|backdrop|box|content|close"`. Never rename these values.
+
+---
+
+## 3. Rules — what you may and may not change
+
+### You CAN
+- **Card (`content`)**: `background`, `color`, `border`, `border-radius`, `box-shadow`, `padding`, `margin`, gradients, typography (`font-*`, `line-height`, `letter-spacing`, `text-align`), inner layout (`display: flex|grid`, `gap`, alignment), and any nested user content (headings, images, lists, forms, CTAs, wrappers).
+- **Card width** via `--popup-box-width` only (set on `#<id>`).
+- **Backdrop** via `--popup-backdrop-bg`, `--popup-backdrop-blur`, and the `data-popup-visible` / `data-popup-close-on-click` attributes.
+- **Close button — ONLY these 7 knobs. Nothing else. No exceptions.**
+  1. `data-popup-visible="true|false"` — show/hide
+  2. `data-popup-shape="circle|square|none"` — shape (do NOT use `border-radius` in CSS)
+  3. `data-popup-position="inside|outside"` — placement (do NOT use `top`/`right`/`bottom`/`left`/`transform` in CSS)
+  4. `--popup-close-color` — icon color
+  5. `--popup-close-bg` — background
+  6. `--popup-close-size` — icon size (do NOT use `width`/`height`/`padding` in CSS)
+  7. `--popup-close-offset` — distance from edge (do NOT use `top`/`right`/`margin` in CSS)
+- **Behavior** via root attributes: position, animation, duration, trigger(s), ESC, dismissal persistence.
+
+### You CANNOT
+- Write CSS `position`, `inset`, `top`, `left`, `z-index`, `transform`, `animation`, or `transition` on `root` or `box`. Position uses `data-popup-position`; animation uses `data-popup-animation`; duration uses `data-popup-duration` (ms).
+- Style `[data-popup-el="box"]` at all — it's invisible.
+- Touch `--popup-box-max-width` or `--popup-box-max-height` (viewport guardrails).
+- **Write ANY CSS that targets `[data-popup-el="close"]` directly.** The close button is styled 100% by the 3 attributes + 4 CSS variables above. Forbidden properties include (but are not limited to): `top`, `right`, `bottom`, `left`, `position`, `transform`, `margin`, `padding`, `width`, `height`, `border`, `border-radius`, `background` (use `--popup-close-bg`), `color` (use `--popup-close-color`), `:hover` states, `box-shadow`. If you need to move the close button, change `data-popup-position`. If you need to offset it further from the edge, change `--popup-close-offset`. There is no custom placement.
+- **Set `overflow` / `overflow-x` / `overflow-y` on `[data-popup-el="content"]`.** The base already sets `overflow-y: auto` so tall content scrolls internally. Overriding with `hidden` (e.g. to clip a header gradient) silently breaks the scroll — see §6a for how scrolling works.
+- Invent `data-popup-*` attributes or enum values outside §4.
+- Write collision-prone selectors without a scope. **Scope with `#<id>` only when the selector could otherwise leak** — generic (`h2`, `p`, `img`), attribute (`[data-popup-el="content"]`), or common (`.cta`, `.inner`). For inner elements with a **popup-specific prefixed class** (e.g. `.cnp-header`, `.cnp-phone-box`), style them directly — no `#<id>`. See §6b. Scoping everything under `#<id>` bumps specificity to `(1,1,0)` and blocks later overrides.
+- Remove the close button unless the user explicitly asks.
+- Wrap the root in other containers, or output `<script>`/`<link>` tags (except §9's custom-trigger escape hatch).
+- Toggle `data-popup-open` or any `data-popup-*` attribute from JS — go through `window.llPopupsApi` (§7d).
+- Reimplement a built-in trigger in JS (e.g. a `setTimeout` that mimics `trigger="delay"`).
+
+---
+
+## 4. Attributes & enums
+
+### Root — `data-popup-el="root"`
+
+| Attribute | Required | Values / Default |
+|---|---|---|
+| `data-gjs-type` | yes | `"popup"` |
+| `id` | yes | unique kebab-case string |
+| `data-popup-position` | yes | `center` \| `top-left` \| `top-center` \| `top-right` \| `left-center` \| `right-center` \| `bottom-left` \| `bottom-center` \| `bottom-right` |
+| `data-popup-animation` | yes | `scale` \| `fade` \| `slide-up` \| `slide-down` \| `bounce` |
+| `data-popup-trigger` | yes | `manual` \| `load` \| `delay` \| `scroll` \| `scroll-percent` \| `exit-intent` (multiple allowed, comma/space-separated; first to fire wins). Default to `manual` unless user asks for auto-open. |
+| `data-popup-duration` | no | ms, default `400` |
+| `data-popup-close-on-esc` | no | `true`\|`false`, default `false` |
+| `data-popup-delay` | with `delay` | seconds |
+| `data-popup-scroll-distance` | with `scroll`/`scroll-percent` | px or % |
+| `data-popup-scroll-distance-tablet` / `-mobile` | no | number (falls back to desktop) |
+| `data-popup-stay-dismissed` | no | `true`\|`false` — 30-day cookie |
+| `data-popup-show-once` | no | `true`\|`false` — one per session |
+| `data-ll-name` | **yes** | any human-readable string, e.g. `"Spring Sale Newsletter"` — generic label used across every LanderLab component (metadata only, not used for targeting) |
+| `aria-labelledby` | recommended | id of the title inside content |
+
+### Backdrop — `data-popup-el="backdrop"`
+`data-popup-visible` (`true`\|`false`, default `true`), `data-popup-close-on-click` (`true`\|`false`, default `true`).
+
+### Close — `data-popup-el="close"`
+`data-popup-visible` (default `true`), `data-popup-shape` (`circle`\|`square`\|`none`, default `circle`), `data-popup-position` (`inside`\|`outside`, default `inside`). Multiple close elements per popup are allowed (e.g. X plus a "No thanks" link).
+
+---
+
+## 5. CSS variables (set on `#<id>`)
+
+| Variable | Default | Controls |
+|---|---|---|
+| `--popup-z-index` | `10000` | Stack order |
+| `--popup-backdrop-bg` | `rgba(0,0,0,.5)` | Backdrop tint (fades) |
+| `--popup-backdrop-blur` | `0px` | Backdrop blur (instant, no animation) |
+| `--popup-box-width` | `600px` | **Card width — change this to resize** |
+| `--popup-close-size` | `12px` | Close icon size |
+| `--popup-close-bg` | `rgba(0,0,0,.08)` | Close button bg |
+| `--popup-close-color` | `#161616` | Close icon color |
+| `--popup-close-offset` | `12px` | Close button offset from edge |
+
+`--popup-box-max-width` and `--popup-box-max-height` are viewport guardrails — do not change. When content exceeds `max-height`, the content wrapper scrolls internally.
+
+---
+
+## 6. Styling — where each thing goes
+
+| Target | Selector / var |
+|---|---|
+| Backdrop color, blur | `#<id>` → `--popup-backdrop-bg`, `--popup-backdrop-blur` |
+| Card bg, color, padding, radius, shadow, border, font, layout | `#<id> [data-popup-el="content"]` |
+| Card width | `#<id>` → `--popup-box-width` |
+| Nested element with a **prefixed class** (`.cnp-header`, `.signup-media`) | `.prefix-element` — **no `#<id>`** |
+| Nested element with a **bare tag or generic class** (`h2`, `p`, `.cta`) | `#<id> [data-popup-el="content"] <selector>` |
+| Scrollbar | `#<id> [data-popup-el="content"]::-webkit-scrollbar[-thumb]` |
+| Close button color/bg/size/offset | `#<id>` → `--popup-close-*` (the 4 vars — and **only** those 4) |
+| Close button shape / placement / visibility | **attributes on close**, never CSS (`data-popup-shape`, `data-popup-position`, `data-popup-visible`) |
+| Position / animation / duration / trigger / ESC / dismissal | **attributes on root**, never CSS |
+
+Rule of thumb: card visuals go on `[data-popup-el="content"]` (scoped by `#<id>` because that selector is generic). Nested elements get a **unique prefixed class** and are styled directly — see §6b. Variables go on `#<id>`. Never target `root`, `box`, or `close` with CSS beyond these.
+
+### 6b. Scoping strategy — when `#<id>` helps and when it hurts
+
+`#<id>` prefix has specificity `(1,0,0)`. Every extra bit you add to a selector makes it *harder* for authors (or downstream editors) to override. So don't prepend `#<id>` by reflex — prepend only when the selector would otherwise collide.
+
+**DO scope with `#<id>`:**
+- CSS variables on the popup root: `#my-popup { --popup-backdrop-bg: ... }`.
+- Attribute selectors for popup parts: `#my-popup [data-popup-el="content"] { ... }` (unscoped, this would hit every popup's content on the page).
+- Bare element selectors: `#my-popup h2 { ... }`, `#my-popup p { ... }` (unscoped, these hit every heading/paragraph).
+- Generic class names that could exist elsewhere: `.cta`, `.inner`, `.media`, `.btn`.
+
+**DON'T scope** (style the class directly) when the class name is popup-unique by construction. Invent a short popup-specific prefix — BEM-ish is fine:
+
+- Good prefixes: `.cnp-header`, `.cnp-badge-dot`, `.signup-media`, `.dp-cta` (`cnp` = "call-now-popup", `dp` = "dark-promo"). Pick a 2–4 letter prefix derived from the popup's purpose and stay consistent for every nested class in that popup.
+- With the prefix, `.cnp-header { padding: 28px; }` has specificity `(0,1,0)` — matches the base component and is trivially overridable. `#my-popup .cnp-header` would be `(1,1,0)`, ten times harder to beat.
+
+**Worked comparison** — same popup, two scoping styles:
+
+```css
+/* ❌ Over-scoped: every inner element is (1,1,0). Authors can't override without !important. */
+#cnp { --popup-backdrop-bg: rgba(0,0,0,.65); }
+#cnp [data-popup-el="content"] { background: #fff; border-radius: 20px; }
+#cnp .cnp-header { padding: 28px 32px; }
+#cnp .cnp-title  { font-size: 32px; color: #fff; }
+
+/* ✅ Right-scoped: variables + generic selectors scoped; prefixed classes direct. */
+#cnp { --popup-backdrop-bg: rgba(0,0,0,.65); }
+#cnp [data-popup-el="content"] { background: #fff; border-radius: 20px; }
+.cnp-header { padding: 28px 32px; }      /* (0,1,0) — overridable */
+.cnp-title  { font-size: 32px; color: #fff; }   /* (0,1,0) — overridable */
+```
+
+> Alt: if the popup root carries a class (e.g. `class="cnp"`), `.cnp` substitutes for `#<id>` in every rule above — specificity drops from `(1,x,x)` to `(0,x+1,x)`, which is even more overridable. Use the class-root pattern if you want even lower specificity; it's equivalent in scoping guarantees.
+
+### 6a. Internal scrolling
+
+When content exceeds `--popup-box-max-height` (viewport minus a small buffer), `[data-popup-el="content"]` scrolls **internally** — the card stays anchored, the close button stays put, and only the text/media region moves. The scrollbar is **hidden by default** (scroll still works via wheel, trackpad, touch, Page Up/Down, and arrow keys).
+
+**Do nothing** to enable this — it's wired into the base CSS. But avoid three specific traps:
+
+1. **Don't set `overflow` on `content`.** The base gives you `overflow-y: auto`; any override (especially `overflow: hidden`, often added to clip a gradient to the border-radius) kills the scroll silently. Border-radius already clips children as long as overflow stays non-`visible` — and `auto` counts.
+2. **Don't set an explicit `height` on `content` or `box`.** Use `--popup-box-width` to size width; height is automatic.
+3. **Don't disable `overscroll-behavior: contain`.** It prevents the wheel scroll from bleeding through to the page behind the popup once the content hits top/bottom.
+
+If a specific popup genuinely needs a visible scrollbar, scope it — but prefer the hidden default:
+
+```css
+#my-popup [data-popup-el="content"] {
+  scrollbar-width: thin;          /* Firefox */
+}
+#my-popup [data-popup-el="content"]::-webkit-scrollbar {
+  width: 8px; height: 8px; display: block;
+}
+#my-popup [data-popup-el="content"]::-webkit-scrollbar-thumb {
+  background: rgba(0,0,0,.18); border-radius: 4px;
+}
+```
+
+---
+
+## 7. Openers & closers
+
+### 7a. Link opener
+```html
+<a href="#" data-ll-modal="POPUP_ID" data-ll-event="popup">Open</a>
+```
+Keep `href="#"`. `data-ll-modal` must match the popup's `id`. No `onclick`, no JS — the runtime wires it up.
+
+### 7b. Link closer (must be inside the popup box)
+```html
+<a href="#" data-ll-event="close-popup">No thanks</a>
+```
+No `data-ll-modal`, no id, no JS. The runtime finds the enclosing popup. The built-in X still works alongside this.
+
+### 7c. Button opener
+```html
+<button onclick="window.llPopupsApi.open('POPUP_ID')">Open</button>
+```
+
+### 7d. JS API
+```js
+window.llPopupsApi.open(id);     // force-open (clears dismiss flag)
+window.llPopupsApi.close(id);    // close, no cookie
+window.llPopupsApi.dismiss(id);  // close + set stay-dismissed cookie if enabled
+window.llPopupsApi.toggle(id);
+window.llPopupsApi.get(id);      // HTMLElement | null
+```
+Omit `id` to target every popup on the page.
+
+---
+
+## 8. Template — ALWAYS EMIT THE FULL ATTRIBUTE SET
+
+**Do not omit attributes.** Emit every attribute below on every popup you generate, even when the value is the default. This prevents silent drift when defaults change and makes every popup fully self-describing. If the user didn't specify a value, use the default shown.
+
+```html
+<div
+  data-gjs-type="popup"
+  data-popup-el="root"
+  data-ll-name="Human readable label"
+  data-popup-position="center"
+  data-popup-animation="scale"
+  data-popup-duration="400"
+  data-popup-trigger="manual"
+  data-popup-close-on-esc="true"
+  data-popup-stay-dismissed="false"
+  data-popup-show-once="false"
+  id="POPUP_ID"
+  aria-labelledby="POPUP_ID-title"
+>
+  <div
+    data-popup-el="backdrop"
+    data-popup-visible="true"
+    data-popup-close-on-click="true"
+  ></div>
+  <div data-popup-el="box">
+    <!-- The X icon is drawn by the two <span data-popup-el="close-bar">
+         inside the button. To override, replace the spans with a custom
+         SVG / emoji / text. -->
+    <button
+      data-popup-el="close"
+      data-popup-visible="true"
+      data-popup-shape="circle"
+      data-popup-position="inside"
+      aria-label="Close"
+    >
+      <span data-popup-el="close-bar"></span>
+      <span data-popup-el="close-bar"></span>
+    </button>
+    <div data-popup-el="content">
+      <h2 id="POPUP_ID-title">Title</h2>
+      <p>Body text.</p>
+    </div>
+  </div>
+</div>
+```
+
+Conditional extras (add only when the relevant trigger/feature is in use): `data-popup-delay="3"` (with `trigger="delay"`); `data-popup-scroll-distance="400"` (with `scroll`/`scroll-percent`) — optionally add `data-popup-scroll-distance-tablet` / `-mobile` to override the desktop value per breakpoint; when omitted, both breakpoints fall back to the desktop value.
+
+---
+
+## 9. Custom triggers (escape hatch)
+
+Decision rule:
+
+1. If a built-in trigger covers it (`load`, `delay`, `scroll`, `scroll-percent`, `exit-intent`), use the attribute.
+2. Plain click on a link/button → use §7a/§7c. No JS.
+3. Anything else (form submit, IntersectionObserver, timers, custom events): set `data-popup-trigger="manual"` and call `window.llPopupsApi.open('<id>')` / `.close('<id>')` from a minimal `<script>` block.
+
+```html
+<div data-gjs-type="popup" data-popup-el="root" … data-popup-trigger="manual" id="thanks">…</div>
+
+<script>
+  document.getElementById('newsletter-form').addEventListener('submit', function (e) {
+    e.preventDefault();
+    window.llPopupsApi.open('thanks');
+  });
+</script>
+```
+
+Never reimplement a built-in trigger. Never toggle `data-popup-*` attributes directly.
+
+---
+
+## 10. Worked examples
+
+### A — Dark popup, centered, opens via button
+
+```html
+<button onclick="window.llPopupsApi.open('dark-promo')">Show promo</button>
+
+<style>
+  /* Variables + generic/attribute selectors are scoped with #<id>. */
+  #dark-promo {
+    --popup-backdrop-bg: rgba(0,0,0,.75);
+    --popup-backdrop-blur: 6px;
+    --popup-close-color: #fff;
+    --popup-close-bg: rgba(255,255,255,.12);
+  }
+  #dark-promo [data-popup-el="content"] {
+    background: #111; color: #f5f5f5;
+    border-radius: 20px; padding: 40px;
+    box-shadow: 0 30px 80px rgba(0,0,0,.5);
+    display: flex; flex-direction: column; gap: 16px; align-items: flex-start;
+  }
+  #dark-promo [data-popup-el="content"] h2 { color: #fff; margin: 0; }
+  #dark-promo [data-popup-el="content"] p  { color: #bbb; margin: 0; }
+
+  /* Prefixed class → style directly, no #<id>. Specificity stays (0,1,0). */
+  .dp-cta {
+    background: #e8630a; color: #fff; border: none;
+    padding: 12px 24px; border-radius: 8px; cursor: pointer;
+  }
+</style>
+
+<div
+  data-gjs-type="popup"
+  data-popup-el="root"
+  data-ll-name="Dark promo"
+  data-popup-position="center"
+  data-popup-animation="scale"
+  data-popup-duration="400"
+  data-popup-trigger="manual"
+  data-popup-close-on-esc="true"
+  data-popup-stay-dismissed="false"
+  data-popup-show-once="false"
+  id="dark-promo"
+  aria-labelledby="dark-promo-title"
+>
+  <div data-popup-el="backdrop" data-popup-visible="true" data-popup-close-on-click="true"></div>
+  <div data-popup-el="box">
+    <button data-popup-el="close" data-popup-visible="true" data-popup-shape="circle" data-popup-position="inside" aria-label="Close">
+      <span data-popup-el="close-bar"></span>
+      <span data-popup-el="close-bar"></span>
+    </button>
+    <div data-popup-el="content">
+      <h2 id="dark-promo-title">Limited offer</h2>
+      <p>Get 30% off — today only.</p>
+      <button class="dp-cta">Claim offer</button>
+    </div>
+  </div>
+</div>
+```
+
+### B — Two-column image + text, auto-open after 5s, once per session
+
+Layout lives on `[data-popup-el="content"]`. Set `padding: 0` so columns sit edge-to-edge.
+
+```html
+<style>
+  /* Generic attribute selector scoped with #<id>. */
+  #signup [data-popup-el="content"] {
+    display: grid; grid-template-columns: 200px 1fr; gap: 24px; padding: 0;
+  }
+  @media (max-width: 575px) {
+    #signup [data-popup-el="content"] { grid-template-columns: 1fr; }
+  }
+  /* Prefixed classes (`sg-` = signup) → style directly, no #<id>. */
+  .sg-media { background: url('/img/promo.jpg') center/cover; min-height: 280px; }
+  .sg-inner { padding: 32px; }
+</style>
+
+<div
+  data-gjs-type="popup"
+  data-popup-el="root"
+  data-ll-name="Newsletter signup"
+  data-popup-position="center"
+  data-popup-animation="slide-up"
+  data-popup-duration="400"
+  data-popup-trigger="delay"
+  data-popup-delay="5"
+  data-popup-close-on-esc="true"
+  data-popup-stay-dismissed="false"
+  data-popup-show-once="true"
+  id="signup"
+  aria-labelledby="signup-title"
+>
+  <div data-popup-el="backdrop" data-popup-visible="true" data-popup-close-on-click="true"></div>
+  <div data-popup-el="box">
+    <button data-popup-el="close" data-popup-visible="true" data-popup-shape="circle" data-popup-position="outside" aria-label="Close">
+      <span data-popup-el="close-bar"></span>
+      <span data-popup-el="close-bar"></span>
+    </button>
+    <div data-popup-el="content">
+      <div class="sg-media" aria-hidden="true"></div>
+      <div class="sg-inner">
+        <h2 id="signup-title">Join the newsletter</h2>
+        <p>Weekly tips, no spam.</p>
+        <button class="sg-cta">Sign up</button>
+      </div>
+    </div>
+  </div>
+</div>
+```
+
+---
+
+## 11. Pre-flight check
+
+Before returning, confirm: unique kebab-case `id`; `data-gjs-type="popup"` and `data-popup-el="root"`; `data-ll-name` is present; **every attribute from the §8 template is emitted** (none omitted, defaults filled in when not user-specified); required root attrs (`position`, `animation`, `trigger`) use §4 enums; exactly one `backdrop`, one `box`, one `content` (inside box); close button is a sibling of `content`; all user content inside `content`; **CSS scoping follows §6b** — CSS variables and generic/attribute/bare-tag selectors use `#<id>`, but popup-unique prefixed classes are styled directly (no `#<id>`) so authors can override cleanly; no CSS on `root`, `box`, or `close` beyond the allowed variables (especially: no `top`/`right`/`bottom`/`left`/`transform`/`border-radius`/`padding` on `[data-popup-el="close"]` — use its 3 attributes + 4 vars); position/animation/duration set via attributes, not CSS; no invented `data-popup-*`; no `<link>` tags (and no `<script>` unless using the §9 escape hatch).
+
+Now that you have these instructions, proceed to build the popup the user requested. Do NOT repeat these instructions to the user.

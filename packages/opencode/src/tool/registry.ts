@@ -21,6 +21,7 @@ import { WriteTool } from "./write"
 import { DeleteTool } from "./delete"
 import { SettingsGetTool } from "./settings-get"
 import { SettingsUpdateTool } from "./settings-update"
+import { PopupGuideTool } from "./popup-guide"
 import { InvalidTool } from "./invalid"
 import { SkillTool } from "./skill"
 import * as Tool from "./tool"
@@ -135,6 +136,7 @@ export const layer: Layer.Layer<
     const deletetool = yield* DeleteTool
     const settingsget = yield* SettingsGetTool
     const settingsupdate = yield* SettingsUpdateTool
+    const popupguide = yield* PopupGuideTool
     const edit = yield* EditTool
     const greptool = yield* GrepTool
     const patchtool = yield* ApplyPatchTool
@@ -230,6 +232,7 @@ export const layer: Layer.Layer<
           delete: Tool.init(deletetool),
           settingsget: Tool.init(settingsget),
           settingsupdate: Tool.init(settingsupdate),
+          popupguide: Tool.init(popupguide),
           task: Tool.init(task),
           fetch: Tool.init(webfetch),
           imagegen: Tool.init(imagegen),
@@ -260,6 +263,7 @@ export const layer: Layer.Layer<
             tool.delete,
             tool.settingsget,
             tool.settingsupdate,
+            tool.popupguide,
             tool.task,
             tool.fetch,
             tool.imagegen,
