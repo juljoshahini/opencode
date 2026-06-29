@@ -63,6 +63,23 @@ const opencodeStartedAt = Date.now()
 // INFO by default — DEBUG floods the tail with opencode's internal chatter.
 // Flip via OPENCODE_LOG_LEVEL=DEBUG in wrangler.jsonc when chasing a bug.
 const OPENCODE_LOG_LEVEL = process.env.OPENCODE_LOG_LEVEL ?? "INFO"
+
+const DOCS_MCP_URL = process.env.LANDERLAB_DOCS_MCP_URL ?? "https://docs.landerlab.io/mcp"
+if (DOCS_MCP_URL) {
+  let docsCfg: Record<string, any> = {}
+  if (process.env.OPENCODE_CONFIG_CONTENT) {
+    try {
+      docsCfg = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT)
+    } catch {}
+  }
+  docsCfg.mcp = {
+    ...(docsCfg.mcp ?? {}),
+    "landerlab-docs": { type: "remote", url: DOCS_MCP_URL, enabled: true, oauth: false, timeout: 10000 },
+  }
+  process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify(docsCfg)
+  log.info("docs.mcp.configured", { url: DOCS_MCP_URL })
+}
+
 log.info("opencode.spawn", {
   host: OPENCODE_HOST,
   port: OPENCODE_PORT,
