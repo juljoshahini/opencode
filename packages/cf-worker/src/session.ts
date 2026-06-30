@@ -283,17 +283,6 @@ export class OpenCodeSession extends Container<Env> {
             ms: Date.now() - tStreamStart,
           })
           sessionState.ctx.waitUntil(sessionState.finalizeRun(opencodeSessionForSync).catch(() => {}))
-          sessionState.ctx.waitUntil(
-            sessionState
-              .notifyTurnComplete({
-                assistantMessageId,
-                opencodeSessionId: opencodeSessionForSync,
-                filesChanged: fc,
-                settingsChanged: sc,
-                finishReason: "stop",
-              })
-              .catch(() => {}),
-          )
         }
       },
       cancel(reason) {
