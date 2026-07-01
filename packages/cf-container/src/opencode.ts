@@ -101,6 +101,21 @@ export async function fetchTranscript(sessionID: string): Promise<Turn[]> {
   return turns
 }
 
+export type RawPart = { id?: string; type?: string; [k: string]: unknown }
+export type MessageWithParts = {
+  info?: { id?: string; role?: string; time?: { created?: number; completed?: number } }
+  parts?: RawPart[]
+}
+
+export async function fetchMessageParts(sessionID: string): Promise<MessageWithParts[]> {
+  const res = await fetch(`${BASE}/session/${sessionID}/message`, { headers: headers() })
+  if (!res.ok) {
+    if (res.status === 404) return []
+    throw new Error(`fetch message parts failed: ${res.status}`)
+  }
+  return (await res.json()) as MessageWithParts[]
+}
+
 export type Attachment = {
   url: string
   mime?: string
@@ -178,6 +193,15 @@ export async function promptAsync(sessionID: string, input: PromptInput): Promis
   if (!res.ok && res.status !== 204) {
     throw new Error(`prompt failed: ${res.status} ${await res.text()}`)
   }
+}
+
+export async function abortSession(sessionID: string): Promise<boolean> {
+  const res = await fetch(`${BASE}/session/${sessionID}/abort`, {
+    method: "POST",
+    headers: headers(),
+  })
+  if (!res.ok) throw new Error(`abort failed: ${res.status} ${await res.text()}`)
+  return (await res.json().catch(() => true)) as boolean
 }
 
 export async function permissionReply(

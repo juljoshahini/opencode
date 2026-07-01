@@ -28,6 +28,7 @@ app.get("/", (c) =>
       "GET /sessions/:id/files/*path": "read file",
       "DELETE /sessions/:id/files/*path": "delete file",
       "POST /sessions/:id/prompt": "run a prompt (SSE) — body: { prompt, agent?, model?, title?, system?, attachments?: [{url, mime?, filename?}] }",
+      "POST /sessions/:id/cancel": "explicitly abort the in-flight prompt (stops token generation; partial turn is still finalized)",
       "DELETE /sessions/:id": "tear down session",
     },
   }),
@@ -118,7 +119,20 @@ app.post("/sessions/:id/prompt", async (c) => {
     method: "POST",
     headers: { "content-type": "application/json" },
     body,
+    signal: c.req.raw.signal,
   })
+})
+
+app.post("/sessions/:id/attach", async (c) => {
+  const id = c.req.param("id")
+  const stub = c.env.SESSIONS.get(c.env.SESSIONS.idFromName(id))
+  return stub.fetch("http://do/__do/attach", { method: "POST", signal: c.req.raw.signal })
+})
+
+app.post("/sessions/:id/cancel", async (c) => {
+  const id = c.req.param("id")
+  const stub = c.env.SESSIONS.get(c.env.SESSIONS.idFromName(id))
+  return stub.fetch("http://do/__do/cancel", { method: "POST" })
 })
 
 app.delete("/sessions/:id", async (c) => {

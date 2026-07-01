@@ -597,7 +597,7 @@ function anthropicAdaptiveEfforts(apiId: string): string[] | null {
   if (["opus-4-7", "opus-4.7", "opus-4-8", "opus-4.8"].some((v) => apiId.includes(v))) {
     return ["low", "medium", "high", "xhigh", "max"]
   }
-  if (["opus-4-6", "opus-4.6", "sonnet-4-6", "sonnet-4.6"].some((v) => apiId.includes(v))) {
+  if (["opus-4-6", "opus-4.6", "sonnet-4-6", "sonnet-4.6", "sonnet-5", "sonnet.5"].some((v) => apiId.includes(v))) {
     return ["low", "medium", "high", "max"]
   }
   return null
@@ -693,7 +693,7 @@ export function variants(model: Provider.Model): Record<string, Record<string, a
               {
                 thinking: {
                   type: "adaptive",
-                  ...(["opus-4-7", "opus-4.7", "opus-4-8", "opus-4.8"].some((v) => model.api.id.includes(v))
+                  ...(["opus-4-7", "opus-4.7", "opus-4-8", "opus-4.8", "sonnet-5", "sonnet.5"].some((v) => model.api.id.includes(v))
                     ? { display: "summarized" }
                     : {}),
                 },

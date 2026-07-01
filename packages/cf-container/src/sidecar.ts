@@ -30,6 +30,7 @@ let lastRequestAt: number | null = null
 let lastRequestPath: string | null = null
 let activeOpencodeSession: string | null = null
 let activeRunStartedAt: number | null = null
+let cancelRequestedRun: { sessionID: string; startedAt: number } | null = null
 let lastRunResult: {
   opencodeSessionId: string
   filesChanged: boolean
@@ -128,6 +129,7 @@ async function handleFsDelete(rel: string): Promise<Response> {
 
 type PromptBody = {
   prompt: string
+  assistantMessageId?: string
   sessionId?: string
   agent?: string
   model?: { providerID: string; id: string; variant?: string }
@@ -144,6 +146,7 @@ type PromptBody = {
   system?: string
   priorTranscript?: Opencode.Turn[]
   attachments?: Opencode.Attachment[]
+  selectedBlocks?: Array<{ id: string; name?: string }>
 }
 
 // Where the agent token lives inside the container. The opencode process is
@@ -362,6 +365,17 @@ The user worked with you previously in this workspace. Below is the prior transc
 ${renderTranscript(body.priorTranscript)}`
   }
 
+  const selectedBlocks = (body.selectedBlocks ?? []).filter((b) => b && typeof b.id === "string" && b.id.length > 0)
+  if (selectedBlocks.length > 0) {
+    const exampleId = selectedBlocks[0]?.id ?? ""
+    const list = selectedBlocks.map((b) => `- ${b.name ? `"${b.name}" — ` : ""}\`id="${b.id}"\``).join("\n")
+    systemPrompt = `${systemPrompt}
+
+## SELECTED ELEMENTS
+The user picked the following element(s) in the visual editor to focus on this turn. Each \`id\` below is a literal \`id="..."\` attribute on that element in the page HTML — locate each one by searching the HTML files for that exact attribute (e.g. grep \`id="${exampleId}"\`), and scope your edits to those element(s) unless the user's message clearly asks for something broader. If an id cannot be found in the files, tell the user the selected element could not be located instead of editing something else.
+${list}`
+  }
+
   // If a prior run is still in flight (typical after a client disconnect —
   // the orphaned run keeps working in here while the user already retries),
   // WAIT for it instead of bouncing with a 409. The mutex map holds the
@@ -389,19 +403,49 @@ ${renderTranscript(body.priorTranscript)}`
   const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>()
   const writer = writable.getWriter()
   const abort = new AbortController()
-  req.signal.addEventListener("abort", () => abort.abort())
+  let clientGone = false
+  req.signal.addEventListener("abort", () => {
+    clientGone = true
+  })
+  const safeWrite = async (event: string, data: unknown) => {
+    if (clientGone) return
+    try {
+      const result = await Promise.race([
+        sse(writer, event, data).then(() => "ok" as const),
+        new Promise<"stalled">((resolve) => setTimeout(() => resolve("stalled"), 10_000)),
+      ])
+      if (result === "stalled") clientGone = true
+    } catch {
+      clientGone = true
+    }
+  }
+  const pendingPushes: Promise<unknown>[] = []
+  const pushPart = (part: { id?: string } | undefined, ordinal: unknown) => {
+    const base = process.env.LANDERLAB_API_BASE
+    const secret = process.env.VERSIONING_AUTH_SECRET
+    const amid = body.assistantMessageId
+    if (!base || !secret || !amid || !part?.id) return
+    pendingPushes.push(
+      fetch(`${base.replace(/\/+$/, "")}/internal/turn-part`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-versioning-auth": secret },
+        body: JSON.stringify({ assistantMessageId: amid, partId: part.id, ordinal, part }),
+      }).catch(() => {}),
+    )
+  }
 
   // Track this as the current active opencode run so shutdown / crash logs
   // can report which session was in flight and how long it'd been running.
+  const runStartedAt = Date.now()
   activeOpencodeSession = sessionID
-  activeRunStartedAt = Date.now()
+  activeRunStartedAt = runStartedAt
 
   const work = (async () => {
     let filesChanged = false
     let settingsChanged = false
     let finishReason = "stop"
     try {
-      await sse(writer, "session", { id: sessionID })
+      await safeWrite("session", { id: sessionID })
 
       const eventRes = await Opencode.eventStream(abort.signal)
       log.info("event.subscribe.open", { runId, opencodeSessionId: sessionID })
@@ -544,7 +588,14 @@ ${renderTranscript(body.priorTranscript)}`
               }
             }
 
-            await sse(writer, event.type ?? "message", event)
+            if (event.type === "message.part.updated") {
+              pushPart(
+                (event.properties as { part?: { id?: string } } | undefined)?.part,
+                (event.properties as { time?: unknown } | undefined)?.time,
+              )
+            }
+
+            await safeWrite(event.type ?? "message", event)
 
             if (event.type === "permission.asked" && sid === sessionID) {
               const reqId = (event.properties as { id?: string } | undefined)?.id
@@ -572,7 +623,8 @@ ${renderTranscript(body.priorTranscript)}`
       }
 
       await promptPromise
-      await sse(writer, "done", { sessionId: sessionID, filesChanged, settingsChanged })
+      await Promise.allSettled(pendingPushes)
+      await safeWrite("done", { sessionId: sessionID, filesChanged, settingsChanged })
       log.info("prompt.done", {
         runId,
         opencodeSessionId: sessionID,
@@ -590,6 +642,10 @@ ${renderTranscript(body.priorTranscript)}`
         await sse(writer, "error", { message: String(e) })
       } catch {}
     } finally {
+      if (cancelRequestedRun && cancelRequestedRun.sessionID === sessionID && cancelRequestedRun.startedAt === runStartedAt) {
+        finishReason = "aborted"
+        cancelRequestedRun = null
+      }
       lastRunResult = { opencodeSessionId: sessionID, filesChanged, settingsChanged, finishReason, at: Date.now() }
       try {
         await writer.close()
@@ -612,6 +668,135 @@ ${renderTranscript(body.priorTranscript)}`
   })()
 
   sessionMutex.set(sessionID, work)
+
+  return new Response(readable, {
+    status: 200,
+    headers: {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache, no-transform",
+      "x-accel-buffering": "no",
+      "x-session-id": sessionID,
+    },
+  })
+}
+
+async function handleAttach(req: Request): Promise<Response> {
+  const body = (await req.json().catch(() => ({}))) as { sessionId?: string }
+  const sessionID = body.sessionId
+  if (!sessionID) return err("attach requires sessionId", 400)
+
+  const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>()
+  const writer = writable.getWriter()
+  const abort = new AbortController()
+  req.signal.addEventListener("abort", () => abort.abort())
+
+  const work = (async () => {
+    try {
+      await sse(writer, "session", { id: sessionID }).catch(() => {})
+      if (activeOpencodeSession !== sessionID) {
+        await sse(writer, "done", { sessionId: sessionID, active: false }).catch(() => {})
+        return
+      }
+
+      let turnAlreadyComplete = false
+      try {
+        const history = await Opencode.fetchMessageParts(sessionID)
+        let startIdx = 0
+        for (let i = history.length - 1; i >= 0; i -= 1) {
+          if (history[i]?.info?.role === "user") {
+            startIdx = i + 1
+            break
+          }
+        }
+        const turnMsgs = history.slice(startIdx).filter((m) => m.info?.role === "assistant")
+        for (const msg of turnMsgs) {
+          const created = msg.info?.time?.created
+          for (const part of msg.parts ?? []) {
+            await sse(writer, "message.part.updated", {
+              type: "message.part.updated",
+              properties: { sessionID, part, role: "assistant", time: created },
+            }).catch(() => {})
+          }
+        }
+        const lastTurnMsg = turnMsgs[turnMsgs.length - 1]
+        if (lastTurnMsg && typeof lastTurnMsg.info?.time?.completed === "number") turnAlreadyComplete = true
+      } catch (e) {
+        log.error("attach.replay.failed", { opencodeSessionId: sessionID, error: String(e) })
+      }
+      if (turnAlreadyComplete) {
+        await sse(writer, "done", { sessionId: sessionID }).catch(() => {})
+        return
+      }
+
+      const eventRes = await Opencode.eventStream(abort.signal)
+      const reader = eventRes.body!.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ""
+      let idle = false
+      const INACTIVITY_MS = 120_000
+      try {
+        while (!idle && !abort.signal.aborted) {
+          const timeout = new Promise<"timeout">((resolve) => {
+            setTimeout(() => resolve("timeout"), INACTIVITY_MS)
+          })
+          const next = await Promise.race([reader.read(), timeout])
+          if (next === "timeout") {
+            log.warn("attach.inactivityTimeout", { opencodeSessionId: sessionID, ms: INACTIVITY_MS })
+            break
+          }
+          const { value, done } = next
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          let sep = buffer.indexOf("\n\n")
+          while (sep !== -1) {
+            const chunk = buffer.slice(0, sep)
+            buffer = buffer.slice(sep + 2)
+            sep = buffer.indexOf("\n\n")
+            const dataLine = chunk
+              .split("\n")
+              .filter((l) => l.startsWith("data: "))
+              .map((l) => l.slice(6))
+              .join("\n")
+            if (!dataLine) continue
+            let event: { type?: string; properties?: Record<string, unknown> }
+            try {
+              event = JSON.parse(dataLine)
+            } catch {
+              continue
+            }
+            const sid = (event.properties as { sessionID?: string } | undefined)?.sessionID
+            if (sid && sid !== sessionID) continue
+            if (event.type === "server.heartbeat") continue
+            if (event.type === "message.part.updated") {
+              const partRole = (event.properties as { role?: string } | undefined)?.role
+              if (partRole && partRole !== "assistant") continue
+            }
+            await sse(writer, event.type ?? "message", event).catch(() => {})
+            if (
+              event.type === "session.status" &&
+              (event.properties as { status?: { type?: string } } | undefined)?.status?.type === "idle" &&
+              sid === sessionID
+            ) {
+              idle = true
+            }
+          }
+        }
+      } finally {
+        await reader.cancel().catch(() => {})
+      }
+      await sse(writer, "done", { sessionId: sessionID }).catch(() => {})
+    } catch (e) {
+      log.error("attach.crash", { opencodeSessionId: sessionID, error: String(e) })
+      try {
+        await sse(writer, "error", { message: String(e) })
+      } catch {}
+    } finally {
+      try {
+        await writer.close()
+      } catch {}
+    }
+  })()
+  void work
 
   return new Response(readable, {
     status: 200,
@@ -817,6 +1002,27 @@ async function handleRequest(req: Request, url: URL): Promise<Response> {
       })
     }
 
+    // Explicit cancel: the user hit stop. Abort the in-flight opencode run so
+    // token generation actually halts (a client disconnect deliberately does
+    // NOT do this). The handlePrompt loop then observes session.status idle,
+    // runs its finally (records lastRunResult with finishReason 'aborted' and
+    // clears activeOpencodeSession), so /__run/active flips active:false and
+    // the DO orphan finalizer syncs the partial turn to R2 as usual.
+    if (url.pathname === "/__run/cancel" && req.method === "POST") {
+      const sid = activeOpencodeSession
+      const startedAt = activeRunStartedAt
+      if (!sid) return json({ cancelled: false, reason: "no-active-run" })
+      try {
+        await Opencode.abortSession(sid)
+      } catch (e) {
+        log.warn("run.cancel.failed", { opencodeSessionId: sid, error: String(e) })
+        return json({ cancelled: false, opencodeSessionId: sid, error: String(e) }, 502)
+      }
+      cancelRequestedRun = { sessionID: sid, startedAt: startedAt ?? 0 }
+      log.info("run.cancel", { opencodeSessionId: sid })
+      return json({ cancelled: true, opencodeSessionId: sid })
+    }
+
     // All routes below here need opencode running. Ensure it's been spawned
     // (auto-fallback for clients that skip /__state/start), then wait for HTTP.
     ensureSpawned()
@@ -833,6 +1039,10 @@ async function handleRequest(req: Request, url: URL): Promise<Response> {
 
     if (url.pathname === "/prompt" && req.method === "POST") {
       return handlePrompt(req)
+    }
+
+    if (url.pathname === "/attach" && req.method === "POST") {
+      return handleAttach(req)
     }
 
     if (url.pathname.startsWith("/transcript/") && req.method === "GET") {

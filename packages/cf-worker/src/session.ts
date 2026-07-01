@@ -4,6 +4,14 @@ import { logger } from "./log"
 
 type Turn = { role: "user" | "assistant"; text: string; time?: number }
 
+type OrphanRunState = {
+  runId: string
+  opencodeSessionId: string
+  assistantMessageId?: string
+  startedAt: number
+  lastResult: { filesChanged?: boolean; settingsChanged?: boolean; finishReason?: string } | null
+}
+
 async function contentHash8(buf: ArrayBuffer): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", buf)
   return Array.from(new Uint8Array(digest).slice(0, 4))
@@ -24,6 +32,9 @@ export class OpenCodeSession extends Container<Env> {
   defaultPort = 8080
   sleepAfter = "60s"
   requiredPorts = [8080]
+
+  private static readonly ORPHAN_POLL_SECONDS = 30
+  private static readonly ORPHAN_MAX_WAIT_MS = 5 * 60_000
 
   override envVars: Record<string, string> = {}
 
@@ -49,6 +60,12 @@ export class OpenCodeSession extends Container<Env> {
 
     if (path === "/__do/run" && req.method === "POST") {
       return this.run(req)
+    }
+    if (path === "/__do/attach" && req.method === "POST") {
+      return this.attach()
+    }
+    if (path === "/__do/cancel" && req.method === "POST") {
+      return this.cancel()
     }
     if (path === "/__do/teardown" && req.method === "POST") {
       return this.teardown()
@@ -189,6 +206,13 @@ export class OpenCodeSession extends Container<Env> {
     let sawDone = false
     let streamedBytes = 0
     let streamedChunks = 0
+
+    if (opencodeSessionForSync) {
+      sessionState.ctx.waitUntil(
+        sessionState.beginOrphanFinalization(runId, opencodeSessionForSync, assistantMessageId).catch(() => {}),
+      )
+    }
+
     const tStreamStart = Date.now()
     // Eager image sync: tool outputs carry a publicUrl that only becomes
     // fetchable once the workspace syncs to R2 — normally at turn end. When
@@ -299,19 +323,8 @@ export class OpenCodeSession extends Container<Env> {
           sawDone,
           ms: Date.now() - tStreamStart,
         })
+        sawDone = true
         reader.cancel(reason).catch(() => {})
-        // The agent run usually SURVIVES a downstream disconnect — opencode's
-        // prompt loop is fire-and-forget inside the container. Snapshotting
-        // immediately here would capture mid-turn state and lose the turn
-        // (June 11 incident: turn completed 40s after the disconnect, but the
-        // only snapshot predated it). finalizeOrphanedRun keeps the container
-        // alive, polls until the run ends, then takes the real final snapshot.
-        if (!sawDone && opencodeSessionForSync) {
-          sawDone = true
-          sessionState.ctx.waitUntil(
-            sessionState.finalizeOrphanedRun(runId, opencodeSessionForSync, assistantMessageId).catch(() => {}),
-          )
-        }
       },
     })
 
@@ -331,86 +344,206 @@ export class OpenCodeSession extends Container<Env> {
     })
   }
 
+  // Read-only re-attach to an in-progress turn: stream the container's live
+  // /event tail back to a reconnecting client. Starts NO turn and runs NO
+  // finalize/snapshot — the original /prompt run owns completion.
+  private async attach(): Promise<Response> {
+    const sessionId = this.sessionId
+    const opencodeSessionId = await this.ctx.storage.get<string>("opencodeSessionId")
+    const sseHeaders = {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache, no-transform",
+      "x-accel-buffering": "no",
+      "x-session-id": sessionId,
+    }
+    if (!opencodeSessionId) {
+      return new Response(`event: done\ndata: ${JSON.stringify({ sessionId, reason: "no-session" })}\n\n`, {
+        status: 200,
+        headers: sseHeaders,
+      })
+    }
+    await this.startAndWaitForPorts(8080)
+    const upstream = await this.containerFetch(
+      new Request("http://container/attach", {
+        method: "POST",
+        headers: { ...this.sidecarHeaders, "content-type": "application/json" },
+        body: JSON.stringify({ sessionId: opencodeSessionId }),
+      }),
+      8080,
+    )
+    if (!upstream.ok || !upstream.body) {
+      logger.warn("attach.upstream.failed", { sessionId, status: upstream.status })
+      return upstream
+    }
+    const sessionState = this
+    const reader = upstream.body.getReader()
+    const stream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        let result: ReadableStreamReadResult<Uint8Array>
+        try {
+          result = await reader.read()
+        } catch (e) {
+          controller.error(e)
+          return
+        }
+        const { value, done } = result
+        if (done) {
+          controller.close()
+          return
+        }
+        sessionState.renewActivityTimeout()
+        controller.enqueue(value)
+      },
+      cancel(reason) {
+        reader.cancel(reason).catch(() => {})
+      },
+    })
+    return new Response(stream, { status: 200, headers: sseHeaders })
+  }
+
+  // Explicit user cancel (stop button). Forwards to the container, which aborts
+  // the in-flight opencode run so token generation actually stops — distinct
+  // from a client disconnect, which by design lets the turn run to completion.
+  // We do NOT touch orphanRun here: the run going idle after the abort makes
+  // /__run/active report active:false, so the already-armed orphan finalizer
+  // still syncs the partial turn to R2 and calls turn-complete (which the
+  // backend no-ops because the row is already settled by the cancel endpoint).
+  private async cancel(): Promise<Response> {
+    const orphan = await this.ctx.storage.get<OrphanRunState>("orphanRun")
+    if (!orphan) {
+      logger.info("cancel.noActiveRun", { sessionId: this.sessionId })
+      return Response.json({ ok: true, cancelled: false, reason: "not-running" })
+    }
+    this.renewActivityTimeout()
+    try {
+      const res = await this.containerFetch(
+        new Request("http://container/__run/cancel", { method: "POST", headers: this.sidecarHeaders }),
+        8080,
+      )
+      const body = (await res.json().catch(() => ({}))) as {
+        cancelled?: boolean
+        opencodeSessionId?: string
+        reason?: string
+      }
+      logger.info("cancel.forwarded", {
+        sessionId: this.sessionId,
+        status: res.status,
+        cancelled: body.cancelled,
+        reason: body.reason,
+      })
+      return Response.json({
+        ok: true,
+        cancelled: Boolean(body.cancelled),
+        opencodeSessionId: body.opencodeSessionId ?? null,
+      })
+    } catch (e) {
+      logger.warn("cancel.failed", { sessionId: this.sessionId, error: String(e) })
+      return Response.json({ ok: false, cancelled: false, error: String(e) })
+    }
+  }
+
   // Called when the downstream client disconnected mid-turn. The container's
   // agent run keeps going on its own, so: take an immediate partial snapshot
   // (in case the container dies), then keep the container alive and poll the
   // sidecar until the run actually completes, then snapshot again — that
   // final snapshot is the one that contains the full turn.
-  private async finalizeOrphanedRun(
+  private async beginOrphanFinalization(
     runId: string,
-    opencodeSessionId: string | null,
+    opencodeSessionId: string,
     assistantMessageId?: string,
   ): Promise<void> {
-    const t0 = Date.now()
-    const MAX_WAIT_MS = 5 * 60_000
-    const POLL_MS = 10_000
-
-    await this.finalizeRun(opencodeSessionId).catch(() => {})
-
-    type RunActive = {
-      active?: boolean
-      runMs?: number | null
-      lastResult?: { filesChanged?: boolean; settingsChanged?: boolean; finishReason?: string } | null
+    const state: OrphanRunState = {
+      runId,
+      opencodeSessionId,
+      assistantMessageId,
+      startedAt: Date.now(),
+      lastResult: null,
     }
-    let lastResult: RunActive["lastResult"] = null
+    await this.ctx.storage.put("orphanRun", state)
+    this.renewActivityTimeout()
+    await this.schedule(OpenCodeSession.ORPHAN_POLL_SECONDS, "orphanPoll", {})
+    logger.info("orphan.scheduled", { runId, sessionId: this.sessionId })
+  }
 
-    while (Date.now() - t0 < MAX_WAIT_MS) {
-      this.renewActivityTimeout()
-      await new Promise((resolve) => setTimeout(resolve, POLL_MS))
-      let active = false
-      try {
-        const res = await this.containerFetch(
-          new Request("http://container/__run/active", {
-            method: "GET",
-            headers: this.sidecarHeaders,
-          }),
-          8080,
-        )
-        if (!res.ok) {
-          logger.warn("orphan.poll.failed", { runId, sessionId: this.sessionId, status: res.status })
-          break
+  async orphanPoll(): Promise<void> {
+    const state = await this.ctx.storage.get<OrphanRunState>("orphanRun")
+    if (!state) return
+    this.renewActivityTimeout()
+    const elapsed = Date.now() - state.startedAt
+
+    let active = true
+    let pollOk = false
+    let lastResult = state.lastResult
+    try {
+      const res = await this.containerFetch(
+        new Request("http://container/__run/active", {
+          method: "GET",
+          headers: this.sidecarHeaders,
+        }),
+        8080,
+      )
+      if (res.ok) {
+        const body = (await res.json()) as {
+          active?: boolean
+          lastResult?: { filesChanged?: boolean; settingsChanged?: boolean; finishReason?: string } | null
         }
-        const body = (await res.json()) as RunActive
         active = Boolean(body.active)
         if (body.lastResult) lastResult = body.lastResult
-      } catch (e) {
-        logger.warn("orphan.poll.threw", { runId, sessionId: this.sessionId, error: String(e) })
-        break
+        pollOk = true
+      } else {
+        logger.warn("orphan.poll.failed", { runId: state.runId, sessionId: this.sessionId, status: res.status })
       }
-      if (!active) {
-        logger.info("orphan.runCompleted", {
-          runId,
-          sessionId: this.sessionId,
-          opencodeSessionId,
-          waitedMs: Date.now() - t0,
-        })
-        await this.finalizeRun(opencodeSessionId).catch(() => {})
-        await this.notifyTurnComplete({
-          assistantMessageId,
-          opencodeSessionId,
-          filesChanged: Boolean(lastResult?.filesChanged),
-          settingsChanged: Boolean(lastResult?.settingsChanged),
-          finishReason: lastResult?.finishReason ?? "stop",
-        }).catch(() => {})
-        return
-      }
+    } catch (e) {
+      logger.warn("orphan.poll.threw", { runId: state.runId, sessionId: this.sessionId, error: String(e) })
     }
 
-    logger.warn("orphan.finalize.gaveUp", {
-      runId,
-      sessionId: this.sessionId,
-      opencodeSessionId,
-      waitedMs: Date.now() - t0,
-    })
-    // Last-resort snapshot — better partial than nothing.
-    await this.finalizeRun(opencodeSessionId).catch(() => {})
-    await this.notifyTurnComplete({
-      assistantMessageId,
-      opencodeSessionId,
-      filesChanged: Boolean(lastResult?.filesChanged),
-      settingsChanged: Boolean(lastResult?.settingsChanged),
-      finishReason: lastResult?.finishReason ?? "timeout",
-    }).catch(() => {})
+    if (pollOk && !active) {
+      logger.info("orphan.runCompleted", {
+        runId: state.runId,
+        sessionId: this.sessionId,
+        opencodeSessionId: state.opencodeSessionId,
+        waitedMs: elapsed,
+      })
+      await this.ctx.storage.delete("orphanRun")
+      await this.finalizeRunBounded(state.opencodeSessionId)
+      await this.notifyTurnComplete({
+        assistantMessageId: state.assistantMessageId,
+        opencodeSessionId: state.opencodeSessionId,
+        filesChanged: Boolean(lastResult?.filesChanged),
+        settingsChanged: Boolean(lastResult?.settingsChanged),
+        finishReason: lastResult?.finishReason ?? "stop",
+      }).catch(() => {})
+      return
+    }
+
+    if (elapsed >= OpenCodeSession.ORPHAN_MAX_WAIT_MS) {
+      logger.warn("orphan.finalize.gaveUp", {
+        runId: state.runId,
+        sessionId: this.sessionId,
+        opencodeSessionId: state.opencodeSessionId,
+        waitedMs: elapsed,
+      })
+      await this.ctx.storage.delete("orphanRun")
+      await this.finalizeRunBounded(state.opencodeSessionId)
+      await this.notifyTurnComplete({
+        assistantMessageId: state.assistantMessageId,
+        opencodeSessionId: state.opencodeSessionId,
+        filesChanged: Boolean(lastResult?.filesChanged),
+        settingsChanged: Boolean(lastResult?.settingsChanged),
+        finishReason: lastResult?.finishReason ?? "timeout",
+      }).catch(() => {})
+      return
+    }
+
+    await this.ctx.storage.put("orphanRun", { ...state, lastResult })
+    await this.schedule(OpenCodeSession.ORPHAN_POLL_SECONDS, "orphanPoll", {})
+  }
+
+  private async finalizeRunBounded(opencodeSessionId: string | null): Promise<void> {
+    await Promise.race([
+      this.finalizeRun(opencodeSessionId).catch(() => {}),
+      new Promise<void>((resolve) => setTimeout(resolve, 45_000)),
+    ])
   }
 
   // Fire-and-forget callback to the backend so the assistant chat row + version
@@ -429,7 +562,7 @@ export class OpenCodeSession extends Container<Env> {
   }): Promise<void> {
     if (!opts.assistantMessageId) return
     const base = this.env.LANDERLAB_API_BASE
-    const secret = this.env.LANDERLAB_CALLBACK_SECRET
+    const secret = this.env.VERSIONING_AUTH_SECRET
     if (!base || !secret) {
       logger.warn("turnComplete.noConfig", {
         sessionId: this.sessionId,
@@ -438,29 +571,43 @@ export class OpenCodeSession extends Container<Env> {
       })
       return
     }
-    try {
-      const res = await fetch(`${base.replace(/\/+$/, "")}/internal/turn-complete`, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-callback-secret": secret },
-        body: JSON.stringify({
-          sessionId: this.sessionId,
-          opencodeSessionId: opts.opencodeSessionId,
-          assistantMessageId: opts.assistantMessageId,
-          filesChanged: opts.filesChanged,
-          settingsChanged: opts.settingsChanged,
-          finishReason: opts.finishReason,
-        }),
-      })
-      logger.info("turnComplete.sent", {
-        sessionId: this.sessionId,
-        assistantMessageId: opts.assistantMessageId,
-        status: res.status,
-        filesChanged: opts.filesChanged,
-        settingsChanged: opts.settingsChanged,
-      })
-    } catch (e) {
-      logger.error("turnComplete.failed", { sessionId: this.sessionId, error: String(e) })
+    const url = `${base.replace(/\/+$/, "")}/internal/turn-complete`
+    const payload = JSON.stringify({
+      sessionId: this.sessionId,
+      opencodeSessionId: opts.opencodeSessionId,
+      assistantMessageId: opts.assistantMessageId,
+      filesChanged: opts.filesChanged,
+      settingsChanged: opts.settingsChanged,
+      finishReason: opts.finishReason,
+    })
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-versioning-auth": secret },
+          body: payload,
+        })
+        if (res.ok) {
+          logger.info("turnComplete.sent", {
+            sessionId: this.sessionId,
+            assistantMessageId: opts.assistantMessageId,
+            status: res.status,
+            attempt,
+            filesChanged: opts.filesChanged,
+            settingsChanged: opts.settingsChanged,
+          })
+          return
+        }
+        logger.error("turnComplete.notOk", { sessionId: this.sessionId, status: res.status, attempt })
+      } catch (e) {
+        logger.error("turnComplete.failed", { sessionId: this.sessionId, error: String(e), attempt })
+      }
+      if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)))
     }
+    logger.error("turnComplete.giveUp", {
+      sessionId: this.sessionId,
+      assistantMessageId: opts.assistantMessageId,
+    })
   }
 
   private async finalizeRun(opencodeSessionId: string | null): Promise<void> {

@@ -30,12 +30,11 @@ export interface Env {
   // "https://preview.landerlabpages.com". The DO builds the agent's
   // per-variant preview URL as `${LANDERLAB_PREVIEW_BASE}/variants/<encId>`.
   LANDERLAB_PREVIEW_BASE?: string
-  // Shared secret for the DO -> backend turn-complete callback. The DO POSTs
-  // ${LANDERLAB_API_BASE}/internal/turn-complete with this in x-callback-secret
-  // when a turn finishes (even after client disconnect) so the backend can
-  // finalize the assistant chat row + version snapshot independently of the
-  // client request.
-  LANDERLAB_CALLBACK_SECRET?: string
+  // Shared secret for the internal backend callbacks (x-versioning-auth): the DO
+  // POSTs /internal/turn-complete and the container POSTs /internal/turn-part with
+  // this header so the backend can persist + finalize independently of the client.
+  // Same secret the backend already uses for /internal/version-preview.
+  VERSIONING_AUTH_SECRET?: string
 }
 
 export const PROVIDER_VARS = [
@@ -48,6 +47,7 @@ export const PROVIDER_VARS = [
   "CF_API_TOKEN",
   "CF_ACCOUNT_ID",
   "LANDERLAB_API_BASE",
+  "VERSIONING_AUTH_SECRET",
 ] as const
 
 // Legacy session-bucket prefix (openlanderlab). No longer used for the
