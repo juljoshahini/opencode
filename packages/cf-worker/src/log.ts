@@ -1,16 +1,20 @@
 type Level = "info" | "warn" | "error" | "debug"
 type Ctx = Record<string, unknown>
 
+// Emit the message string plus a structured payload object (NOT a
+// pre-stringified blob): Workers Logs indexes object-argument fields, which
+// makes dashboard queries like sessionId="..." or msg="turnComplete.sent"
+// actually work. wrangler tail prints both, so grep-ability is unchanged.
 export function log(level: Level, msg: string, ctx?: Ctx): void {
-  const line = JSON.stringify({
+  const payload = {
     ts: new Date().toISOString(),
     level,
     msg,
     component: "worker",
     ...(ctx ?? {}),
-  })
-  if (level === "error") console.error(line)
-  else console.log(line)
+  }
+  if (level === "error") console.error(msg, payload)
+  else console.log(msg, payload)
 }
 
 export const logger = {

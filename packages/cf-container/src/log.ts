@@ -8,11 +8,14 @@ export function setBase(ctx: Ctx): void {
   baseCtx = { ...baseCtx, ...ctx }
 }
 
+// `msg` first: container stdout reaches Workers Logs as a JSON text line and
+// the dashboard displays the FIRST field as the entry's message — with `ts`
+// first, entries render as a bare timestamp.
 function emit(level: Level, msg: string, ctx?: Ctx): void {
   const line = JSON.stringify({
-    ts: new Date().toISOString(),
-    level,
     msg,
+    level,
+    ts: new Date().toISOString(),
     component: "sidecar",
     ...baseCtx,
     ...(ctx ?? {}),

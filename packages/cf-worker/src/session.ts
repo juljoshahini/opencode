@@ -10,6 +10,7 @@ type OrphanRunState = {
   assistantMessageId?: string
   startedAt: number
   lastResult: { filesChanged?: boolean; settingsChanged?: boolean; finishReason?: string } | null
+  failedPolls?: number
 }
 
 async function contentHash8(buf: ArrayBuffer): Promise<string> {
@@ -34,7 +35,13 @@ export class OpenCodeSession extends Container<Env> {
   requiredPorts = [8080]
 
   private static readonly ORPHAN_POLL_SECONDS = 30
-  private static readonly ORPHAN_MAX_WAIT_MS = 5 * 60_000
+  // Give up ONLY when the container is genuinely unreachable for this many
+  // CONSECUTIVE polls (~3min), never on elapsed time while the run reports
+  // active — a healthy generation legitimately runs 10+ minutes and the old
+  // flat 5-minute ceiling was guillotining every long turn mid-run.
+  private static readonly ORPHAN_MAX_FAILED_POLLS = 6
+  // Absolute runaway backstop, far above any legitimate turn.
+  private static readonly ORPHAN_ABSOLUTE_MAX_MS = 45 * 60_000
 
   override envVars: Record<string, string> = {}
 
@@ -52,6 +59,14 @@ export class OpenCodeSession extends Container<Env> {
       const v = env[key]
       if (v) this.envVars[key] = v
     }
+    // Set here — not in run() — because the container's env freezes at its
+    // FIRST start, and attach()/cancel()/orphanPoll can cold-start it. A
+    // container booted without WORKER_DRAFT_PREFIX makes image_generate
+    // return publicUrl:null for its whole warm lifetime (no chat thumbnails).
+    // Both values are pure functions of the session id + worker env.
+    this.envVars.WORKER_DRAFT_PREFIX = this.draftPrefix()
+    const previewBase = (env.LANDERLAB_PREVIEW_BASE ?? "https://preview.landerlabpages.com").replace(/\/+$/, "")
+    this.envVars.WORKER_PREVIEW_URL = `${previewBase}/variants/${this.sessionId}`
   }
 
   override async fetch(req: Request): Promise<Response> {
@@ -110,17 +125,6 @@ export class OpenCodeSession extends Container<Env> {
     if (byok) this.envVars.AI_GATEWAY_API_KEY = byok
     else if (this.env.AI_GATEWAY_API_KEY) this.envVars.AI_GATEWAY_API_KEY = this.env.AI_GATEWAY_API_KEY
 
-    // Tell the container where its workspace lives in the draft bucket so
-    // image_generate can form public URLs (R2_PUBLIC_BASE + this prefix) and
-    // reference images relatively in HTML. Set before the container starts.
-    this.envVars.WORKER_DRAFT_PREFIX = this.draftPrefix()
-
-    // The exact per-variant preview URL, so the agent can url_screenshot the
-    // rendered draft without guessing the id format. The session id IS the
-    // variant's encryptedId (the backend sends it that way).
-    const previewBase = (this.env.LANDERLAB_PREVIEW_BASE ?? "https://preview.landerlabpages.com").replace(/\/+$/, "")
-    this.envVars.WORKER_PREVIEW_URL = `${previewBase}/variants/${this.sessionId}`
-
     const tBootStart = Date.now()
     await this.startAndWaitForPorts(8080)
     logger.info("container.ready", { runId, sessionId, msToReady: Date.now() - tBootStart, byok: Boolean(byok) })
@@ -131,12 +135,28 @@ export class OpenCodeSession extends Container<Env> {
     // container resume with the exact opencode state — tool history,
     // compaction markers, everything — that the previous prompt ended with.
     const tStateRestore = Date.now()
-    const stateRestored = await this.pushStateToContainer(runId)
-    await this.signalOpencodeStart(runId)
+    // On a warm container opencode is already running and the sidecar rejects
+    // restore anyway (restore must precede spawn) — the push was a guaranteed
+    // 409 costing an R2 GET + base64 decode + PUT on every warm prompt. One
+    // cheap readiness probe skips all of it.
+    let opencodeReady = false
+    try {
+      const readyRes = await this.containerFetch(
+        new Request("http://container/__state/ready", { method: "GET", headers: this.sidecarHeaders }),
+        8080,
+      )
+      opencodeReady = readyRes.ok && Boolean(((await readyRes.json()) as { ready?: boolean }).ready)
+    } catch {}
+    let stateRestored = false
+    if (!opencodeReady) {
+      stateRestored = await this.pushStateToContainer(runId)
+      await this.signalOpencodeStart(runId)
+    }
     logger.info("state.restore", {
       runId,
       sessionId,
       restored: stateRestored,
+      skipped: opencodeReady,
       ms: Date.now() - tStateRestore,
     })
 
@@ -215,15 +235,19 @@ export class OpenCodeSession extends Container<Env> {
 
     const tStreamStart = Date.now()
     // Eager image sync: tool outputs carry a publicUrl that only becomes
-    // fetchable once the workspace syncs to R2 — normally at turn end. When
-    // we spot an image-producing tool completing mid-stream, sync right away
-    // (debounced) so the frontend's thumbnails load seconds after generation
-    // instead of after the whole turn. `eagerWindow` is a small sliding
-    // window over the decoded stream so markers split across chunks still
-    // match.
+    // fetchable once the file lands in R2 — normally at turn end. When an
+    // image-producing tool completes mid-stream, upload the workspace's
+    // IMAGE files right away (never HTML/CSS, never the stale-prune — those
+    // stay turn-end only, so mid-turn page state never leaks to the draft).
+    // The trigger COALESCES instead of dropping: a burst of images schedules
+    // one trailing sync, so the last image of a burst always gets uploaded
+    // well inside the frontend thumbnail's retry budget. `eagerWindow` is a
+    // small sliding window over the decoded stream so markers split across
+    // chunks still match.
     let eagerWindow = ""
     let lastEagerSyncAt = 0
-    const EAGER_SYNC_DEBOUNCE_MS = 8_000
+    let eagerTimer: ReturnType<typeof setTimeout> | null = null
+    const EAGER_SYNC_DEBOUNCE_MS = 3_000
     const EAGER_TOOL_RX = /"tool":\s*"(?:image_generate|image_use|imageTool)"/
 
     const stream = new ReadableStream<Uint8Array>({
@@ -274,15 +298,17 @@ export class OpenCodeSession extends Container<Env> {
         textBuffer += chunkText
 
         eagerWindow = (eagerWindow + chunkText).slice(-8192)
-        if (
-          eagerWindow.includes('"completed"') &&
-          EAGER_TOOL_RX.test(eagerWindow) &&
-          Date.now() - lastEagerSyncAt > EAGER_SYNC_DEBOUNCE_MS
-        ) {
-          lastEagerSyncAt = Date.now()
+        if (eagerWindow.includes('"completed"') && EAGER_TOOL_RX.test(eagerWindow)) {
           eagerWindow = ""
-          logger.info("r2.sync.eager", { runId, sessionId, streamedChunks })
-          sessionState.ctx.waitUntil(sessionState.syncToR2().catch(() => {}))
+          if (eagerTimer === null) {
+            const wait = Math.max(250, EAGER_SYNC_DEBOUNCE_MS - (Date.now() - lastEagerSyncAt))
+            eagerTimer = setTimeout(() => {
+              eagerTimer = null
+              lastEagerSyncAt = Date.now()
+              logger.info("r2.sync.eagerImages", { runId, sessionId, streamedChunks })
+              sessionState.ctx.waitUntil(sessionState.syncImagesToR2().catch(() => {}))
+            }, wait)
+          }
         }
 
         if (!sawDone && textBuffer.includes("event: done")) {
@@ -306,7 +332,14 @@ export class OpenCodeSession extends Container<Env> {
             settingsChanged: sc,
             ms: Date.now() - tStreamStart,
           })
-          sessionState.ctx.waitUntil(sessionState.finalizeRun(opencodeSessionForSync).catch(() => {}))
+          sessionState.ctx.waitUntil(
+            sessionState
+              .finalizeAndNotify(runId, opencodeSessionForSync, assistantMessageId, {
+                filesChanged: fc,
+                settingsChanged: sc,
+              })
+              .catch(() => {}),
+          )
         }
       },
       cancel(reason) {
@@ -358,6 +391,20 @@ export class OpenCodeSession extends Container<Env> {
     }
     if (!opencodeSessionId) {
       return new Response(`event: done\ndata: ${JSON.stringify({ sessionId, reason: "no-session" })}\n\n`, {
+        status: 200,
+        headers: sseHeaders,
+      })
+    }
+    // No armed run (orphanRun is written at run start, cleared at completion)
+    // means there is nothing live to attach to. Answer instantly instead of
+    // cold-booting a slept container just to hear "no active run" — reconnects
+    // against settled/stale 'generating' rows were paying 7-40s for nothing,
+    // and the sidecar's spawn-without-state-restore fallback then poisoned the
+    // container's warm lifetime with an empty opencode DB.
+    const armed = await this.ctx.storage.get<OrphanRunState>("orphanRun")
+    if (!armed) {
+      logger.info("attach.noActiveRun", { sessionId })
+      return new Response(`event: done\ndata: ${JSON.stringify({ sessionId, active: false, reason: "no-active-run" })}\n\n`, {
         status: 200,
         headers: sseHeaders,
       })
@@ -442,6 +489,43 @@ export class OpenCodeSession extends Container<Env> {
     }
   }
 
+  // Happy-path completion (the DO saw `event: done`). Establishes the ordering
+  // the version snapshot depends on: files land in R2 FIRST (finalizeRun),
+  // THEN the backend is told the turn completed — so its snapshot reads the
+  // post-turn draft, never a stale or half-synced one. On successful delivery
+  // the orphan backstop is disarmed; on failure it stays armed and retries.
+  private async finalizeAndNotify(
+    runId: string,
+    opencodeSessionId: string | null,
+    assistantMessageId: string | undefined,
+    fallback: { filesChanged: boolean; settingsChanged: boolean },
+  ): Promise<void> {
+    await this.finalizeRun(opencodeSessionId)
+    type RunResult = { filesChanged?: boolean; settingsChanged?: boolean; finishReason?: string }
+    let lastResult: RunResult | null = null
+    try {
+      const res = await this.containerFetch(
+        new Request("http://container/__run/active", { method: "GET", headers: this.sidecarHeaders }),
+        8080,
+      )
+      if (res.ok) {
+        const body = (await res.json()) as { lastResult?: RunResult | null }
+        lastResult = body.lastResult ?? null
+      }
+    } catch {}
+    const delivered = await this.notifyTurnComplete({
+      assistantMessageId,
+      opencodeSessionId,
+      filesChanged: lastResult?.filesChanged ?? fallback.filesChanged,
+      settingsChanged: lastResult?.settingsChanged ?? fallback.settingsChanged,
+      finishReason: lastResult?.finishReason ?? "stop",
+    }).catch(() => false)
+    if (delivered) {
+      await this.ctx.storage.delete("orphanRun")
+    }
+    logger.info("finalize.notified", { runId, sessionId: this.sessionId, delivered })
+  }
+
   // Called when the downstream client disconnected mid-turn. The container's
   // agent run keeps going on its own, so: take an immediate partial snapshot
   // (in case the container dies), then keep the container alive and poll the
@@ -516,12 +600,16 @@ export class OpenCodeSession extends Container<Env> {
       return
     }
 
-    if (elapsed >= OpenCodeSession.ORPHAN_MAX_WAIT_MS) {
+    const failedPolls = pollOk ? 0 : (state.failedPolls ?? 0) + 1
+
+    if (failedPolls >= OpenCodeSession.ORPHAN_MAX_FAILED_POLLS || elapsed >= OpenCodeSession.ORPHAN_ABSOLUTE_MAX_MS) {
       logger.warn("orphan.finalize.gaveUp", {
         runId: state.runId,
         sessionId: this.sessionId,
         opencodeSessionId: state.opencodeSessionId,
         waitedMs: elapsed,
+        failedPolls,
+        reason: failedPolls >= OpenCodeSession.ORPHAN_MAX_FAILED_POLLS ? "unreachable" : "absolute-max",
       })
       await this.ctx.storage.delete("orphanRun")
       await this.finalizeRunBounded(state.opencodeSessionId)
@@ -535,7 +623,7 @@ export class OpenCodeSession extends Container<Env> {
       return
     }
 
-    await this.ctx.storage.put("orphanRun", { ...state, lastResult })
+    await this.ctx.storage.put("orphanRun", { ...state, lastResult, failedPolls })
     await this.schedule(OpenCodeSession.ORPHAN_POLL_SECONDS, "orphanPoll", {})
   }
 
@@ -559,8 +647,8 @@ export class OpenCodeSession extends Container<Env> {
     filesChanged: boolean
     settingsChanged: boolean
     finishReason: string
-  }): Promise<void> {
-    if (!opts.assistantMessageId) return
+  }): Promise<boolean> {
+    if (!opts.assistantMessageId) return true
     const base = this.env.LANDERLAB_API_BASE
     const secret = this.env.VERSIONING_AUTH_SECRET
     if (!base || !secret) {
@@ -569,7 +657,7 @@ export class OpenCodeSession extends Container<Env> {
         hasBase: Boolean(base),
         hasSecret: Boolean(secret),
       })
-      return
+      return true
     }
     const url = `${base.replace(/\/+$/, "")}/internal/turn-complete`
     const payload = JSON.stringify({
@@ -596,7 +684,7 @@ export class OpenCodeSession extends Container<Env> {
             filesChanged: opts.filesChanged,
             settingsChanged: opts.settingsChanged,
           })
-          return
+          return true
         }
         logger.error("turnComplete.notOk", { sessionId: this.sessionId, status: res.status, attempt })
       } catch (e) {
@@ -608,6 +696,7 @@ export class OpenCodeSession extends Container<Env> {
       sessionId: this.sessionId,
       assistantMessageId: opts.assistantMessageId,
     })
+    return false
   }
 
   private async finalizeRun(opencodeSessionId: string | null): Promise<void> {
@@ -794,11 +883,75 @@ export class OpenCodeSession extends Container<Env> {
     return count
   }
 
+  // Serializes every workspace->R2 sync per DO. Overlapping invocations (eager
+  // image sync vs done-finalize vs orphan-finalize) must not interleave: an
+  // older sync's stale-prune runs against ITS list snapshot and would delete
+  // files a newer concurrent sync just uploaded.
+  private syncChain: Promise<void> = Promise.resolve()
+
+  private syncToR2(): Promise<void> {
+    const next = this.syncChain.then(() => this.syncToR2Unserialized())
+    this.syncChain = next.catch(() => {})
+    return next
+  }
+
+  private static readonly IMAGE_EXT_RX = /\.(png|jpe?g|webp|gif|svg|avif|ico)$/i
+  private eagerImageSizes = new Map<string, number>()
+
+  private syncImagesToR2(): Promise<void> {
+    const next = this.syncChain.then(() => this.syncImagesToR2Unserialized())
+    this.syncChain = next.catch(() => {})
+    return next
+  }
+
+  private async syncImagesToR2Unserialized(): Promise<void> {
+    const t0 = Date.now()
+    const listRes = await this.containerFetch(
+      new Request("http://container/list", { method: "GET", headers: this.sidecarHeaders }),
+      8080,
+    )
+    if (!listRes.ok) {
+      logger.warn("r2.sync.images.listFailed", { sessionId: this.sessionId, status: listRes.status })
+      return
+    }
+    const allFiles = (await listRes.json()) as { files: string[] }
+    const images = allFiles.files.filter(
+      (rel) =>
+        rel &&
+        !rel.split("/").some((seg) => seg.startsWith(".")) &&
+        OpenCodeSession.IMAGE_EXT_RX.test(rel),
+    )
+    let uploaded = 0
+    await Promise.all(
+      images.map(async (rel) => {
+        const key = draftKeyFor(this.sessionId, rel)
+        if (key === null) return
+        const fileRes = await this.containerFetch(
+          new Request(`http://container/fs/${encodeURI(rel)}`, { method: "GET", headers: this.sidecarHeaders }),
+          8080,
+        )
+        if (!fileRes.ok || !fileRes.body) return
+        const body = await fileRes.arrayBuffer()
+        if (this.eagerImageSizes.get(rel) === body.byteLength) return
+        const mime = (fileRes.headers.get("content-type") ?? "application/octet-stream").split(";")[0].trim()
+        await this.env.PROD.put(key, body, { httpMetadata: { contentType: mime } })
+        this.eagerImageSizes.set(rel, body.byteLength)
+        uploaded += 1
+      }),
+    )
+    logger.info("r2.sync.images", {
+      sessionId: this.sessionId,
+      images: images.length,
+      uploaded,
+      ms: Date.now() - t0,
+    })
+  }
+
   // Push the agent workspace OUT to the variant draft
   // (landerlab-prod/variants/unpublished/<encId>/). Excludes internal/dot
   // paths (e.g. .screenshots) so agent scratch never reaches the draft (and
   // thus never gets Published onto the live page).
-  private async syncToR2(): Promise<void> {
+  private async syncToR2Unserialized(): Promise<void> {
     const t0 = Date.now()
     const prefix = this.draftPrefix()
     const listRes = await this.containerFetch(
