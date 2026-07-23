@@ -808,10 +808,20 @@ async function handleAttach(req: Request): Promise<Response> {
       }
       await sse(writer, "done", { sessionId: sessionID }).catch(() => {})
     } catch (e) {
-      log.error("attach.crash", { opencodeSessionId: sessionID, error: String(e) })
-      try {
-        await sse(writer, "error", { message: String(e) })
-      } catch {}
+      // A client disconnecting from the (visual-only) reconnect stream aborts
+      // req.signal -> the live-tail read throws AbortError. That's expected
+      // detach, not a failure: log it quietly and do NOT push an `error`
+      // event (the turn keeps running + finalizes in the background). Only a
+      // genuine unexpected error is a real crash worth surfacing.
+      const aborted = abort.signal.aborted || (e instanceof Error && e.name === "AbortError")
+      if (aborted) {
+        log.info("attach.detached", { opencodeSessionId: sessionID })
+      } else {
+        log.error("attach.crash", { opencodeSessionId: sessionID, error: String(e) })
+        try {
+          await sse(writer, "error", { message: String(e) })
+        } catch {}
+      }
     } finally {
       try {
         await writer.close()

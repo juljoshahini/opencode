@@ -23,6 +23,7 @@ import {
   isImageAttachment,
   base64BytesFromDataUrl,
   imageDimensionsFromDataUrl,
+  sniffMimeFromDataUrl,
   MAX_IMAGE_EDGE,
   MAX_ATTACHMENT_BYTES,
 } from "@/util/media"
@@ -802,7 +803,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
           ...(outputObject.text ? [{ type: "text", text: outputObject.text }] : []),
           ...attachments.map((attachment) => ({
             type: "media",
-            mediaType: attachment.mime,
+            mediaType: sniffMimeFromDataUrl(attachment.url, attachment.mime),
             data: iife(() => {
               const commaIndex = attachment.url.indexOf(",")
               return commaIndex === -1 ? attachment.url : attachment.url.slice(commaIndex + 1)
@@ -846,7 +847,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
               userMessage.parts.push({
                 type: "file",
                 url: part.url,
-                mediaType: part.mime,
+                mediaType: sniffMimeFromDataUrl(part.url, part.mime),
                 filename: part.filename,
               })
             }
@@ -1029,7 +1030,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
               ...media.map((attachment) => ({
                 type: "file" as const,
                 url: attachment.url,
-                mediaType: attachment.mime,
+                mediaType: sniffMimeFromDataUrl(attachment.url, attachment.mime),
                 filename: attachment.filename,
               })),
             ],

@@ -7,6 +7,19 @@ const MAX_BASE64_BYTES = 5 * 1024 * 1024
 const MAX_INPUT_PIXELS = 300_000_000
 const JPEG_QUALITIES = [85, 75, 65, 55, 45]
 
+// Magic-byte sniff so a mislabeled image (declared image/png, actually WebP)
+// gets the correct mime BEFORE it's stored in the opencode session. A wrong
+// media_type makes Anthropic reject the whole request and wedge the session.
+function sniffImageMime(bytes: Buffer, fallback: string | undefined): string | undefined {
+  const at = (i: number, p: number[]) => p.every((v, k) => bytes[i + k] === v)
+  if (at(0, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "image/png"
+  if (at(0, [0xff, 0xd8, 0xff])) return "image/jpeg"
+  if (at(0, [0x47, 0x49, 0x46, 0x38])) return "image/gif"
+  if (at(0, [0x42, 0x4d])) return "image/bmp"
+  if (at(0, [0x52, 0x49, 0x46, 0x46]) && at(8, [0x57, 0x45, 0x42, 0x50])) return "image/webp"
+  return fallback
+}
+
 function inferMime(url: string): string | undefined {
   const m = url.match(/^data:([^;,]+)[;,]/)
   if (m) return m[1]?.toLowerCase()
@@ -52,7 +65,8 @@ async function resizeOne(att: Attachment): Promise<Attachment> {
     const h = meta.height ?? 0
     const base64Size = Math.ceil((bytes.length * 4) / 3)
     if (w > 0 && h > 0 && w <= MAX_DIM && h <= MAX_DIM && base64Size <= MAX_BASE64_BYTES) {
-      return att
+      const trueMime = sniffImageMime(bytes, mime)
+      return trueMime && trueMime !== att.mime ? { ...att, mime: trueMime } : att
     }
 
     const resized = await sharp(bytes, { failOn: "none", limitInputPixels: MAX_INPUT_PIXELS })

@@ -92,6 +92,26 @@ export function getImageDimensions(bytes: Uint8Array): { width: number; height: 
   return undefined
 }
 
+// Return the TRUE media type of a base64 data URL by sniffing its magic
+// bytes, falling back to the declared type when the URL isn't a base64 data
+// URL or the bytes are unrecognized. Anthropic rejects a request outright
+// when the declared media_type disagrees with the actual image bytes (e.g.
+// a WebP labeled image/png), which wedges the whole session — so every
+// data-URL image part must be relabeled to what it actually is before it
+// reaches the provider.
+export function sniffMimeFromDataUrl(url: string, fallback: string): string {
+  if (!url.startsWith("data:")) return fallback
+  const comma = url.indexOf(",")
+  if (comma === -1) return fallback
+  if (!url.slice(5, comma).toLowerCase().includes("base64")) return fallback
+  try {
+    const head = Buffer.from(url.slice(comma + 1, comma + 1 + 64), "base64")
+    return sniffAttachmentMime(head, fallback)
+  } catch {
+    return fallback
+  }
+}
+
 export function base64BytesFromDataUrl(url: string): number | undefined {
   if (!url.startsWith("data:")) return undefined
   const comma = url.indexOf(",")
