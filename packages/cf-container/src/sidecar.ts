@@ -219,6 +219,14 @@ LANDER SETTINGS
 - settings_update is a partial patch merged server-side (omitted fields are left untouched) and applies immediately on success (no separate publish step). When you change a field that builds on its current value (e.g. appending to keywords or custom code), base it on THIS turn's fresh settings_get — not an older value — so you don't clobber an edit the user just made in the UI. On a validation error, the message names the bad field — fix and retry once.
 - If the tools report that no token is available, tell the user settings can't be changed right now and continue with the rest of their request.
 
+ANALYTICS & LEADS (read-only)
+- analytics_get({from, to, timezone?}) — this lander's traffic + performance for a date range (YYYY-MM-DD, inclusive): per-day visits, unique visits, conversions, clicks, bot visits, and lead counts, plus totals.
+- leads_get({from, to, page?, limit?, timezone?}) — the actual captured leads (form/quiz submissions) in the range: total, per-day counts, and a page of rows whose data is [{key,label,value}] answers. Default 50/page, max 200.
+- Use them when the user asks how the page is performing, about conversions/traffic, "how many leads", "analyze my leads", or comparisons over time. When no range is given, default to the last 7 days ending today and SAY which range you used.
+- Analyze, don't dump: summarize trends, top answer values per key, conversion patterns; quote at most a handful of example leads. Leads are the user's own captured data — present it faithfully and never invent fields or values.
+- Zero conversions/clicks may just mean conversion tracking is disabled in settings (check settings_get conversions.*) — say so instead of concluding the page gets no engagement.
+- If the tools report that no token is available, tell the user analytics/leads can't be read right now and continue.
+
 OUTPUT REQUIREMENTS
 - Never use \`<button>\` elements. ALL buttons (CTAs, navigation, form submits, modal triggers, scroll links — everything) must be \`<a>\` elements styled as buttons. Example: \`<a href="#" class="btn">\`.
 - Modern, clean, accessible, mobile-responsive markup
@@ -320,7 +328,9 @@ async function handlePrompt(req: Request): Promise<Response> {
     log.info("opencode.session.created", { runId, opencodeSessionId: sessionID })
   }
 
-  let systemPrompt = body.system ?? LANDING_PAGE_SYSTEM
+  let systemPrompt = `${body.system ?? LANDING_PAGE_SYSTEM}
+
+Today's date is ${new Date().toISOString().slice(0, 10)} (UTC).`
 
   // Tell the agent where its page renders, and — critically — that its edits
   // only become visible there AFTER the turn ends, so it must not screenshot
@@ -532,7 +542,19 @@ ${list}`
             }
 
             const sid = (event.properties as { sessionID?: string } | undefined)?.sessionID
-            if (sid && sid !== sessionID) continue
+            if (sid && sid !== sessionID) {
+              // Another session's event — e.g. a task-spawned subagent (quiz)
+              // working in its child session. Never relayed to the client, but
+              // it IS proof opencode is alive: without this the parent stream
+              // looks dead during a long sub-task and the stall watchdog would
+              // guillotine a healthy turn. Also count subagent file edits —
+              // the child writes into the same shared /workspace.
+              if (event.type !== "server.heartbeat") {
+                lastRealEventAt = Date.now()
+                if (event.type === "file.edited") filesChanged = true
+              }
+              continue
+            }
 
             if (event.type === "server.heartbeat") {
               heartbeatCount += 1

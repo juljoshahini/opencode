@@ -1,0 +1,9 @@
+Read the actual leads (form/quiz submissions) captured by this lander for a date range.
+
+Returns the total count, per-day (or per-hour for single-day ranges) counts, and a page of lead rows — each lead's `data` is an array of {key, label, value} answers exactly as the visitor submitted them. Scoped to THIS lander variant only.
+
+- from / to are inclusive calendar dates in YYYY-MM-DD format; timezone (optional IANA name) affects the per-bucket counts.
+- Pagination: limit defaults to 50 (max 200), page defaults to 1. For large ranges, look at the total first, then fetch only the pages you need — prefer ANALYZING and SUMMARIZING (top answers per key, trends over time, completion patterns) over dumping raw rows into your reply.
+- Leads contain visitor-submitted data the user owns (may include names/emails). Analyze it faithfully; never invent fields or values that aren't in the data.
+- saved:false rows mean raw values were intentionally not persisted (lead-saving disabled at capture time) — only their counts are meaningful.
+- If the tool reports no agent token, tell the user leads can't be read right now and continue with the rest of their request.

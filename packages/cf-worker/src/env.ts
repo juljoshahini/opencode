@@ -35,6 +35,12 @@ export interface Env {
   // this header so the backend can persist + finalize independently of the client.
   // Same secret the backend already uses for /internal/version-preview.
   VERSIONING_AUTH_SECRET?: string
+  // Optional DO location hint (e.g. "enam") applied when resolving session
+  // stubs. Honored ONLY at a DO's first-ever creation — existing sessions
+  // never move. Set during beta so NEW sessions (and their colocated
+  // containers, whose egress IP is what model providers geo-check) land in
+  // the hinted region; clear it to return to nearest-colo placement.
+  SESSIONS_LOCATION_HINT?: string
 }
 
 export const PROVIDER_VARS = [

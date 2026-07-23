@@ -22,6 +22,8 @@ import { DeleteTool } from "./delete"
 import { SettingsGetTool } from "./settings-get"
 import { SettingsUpdateTool } from "./settings-update"
 import { PopupGuideTool } from "./popup-guide"
+import { AnalyticsGetTool } from "./analytics-get"
+import { LeadsGetTool } from "./leads-get"
 import { InvalidTool } from "./invalid"
 import { SkillTool } from "./skill"
 import * as Tool from "./tool"
@@ -137,6 +139,8 @@ export const layer: Layer.Layer<
     const settingsget = yield* SettingsGetTool
     const settingsupdate = yield* SettingsUpdateTool
     const popupguide = yield* PopupGuideTool
+    const analyticsget = yield* AnalyticsGetTool
+    const leadsget = yield* LeadsGetTool
     const edit = yield* EditTool
     const greptool = yield* GrepTool
     const patchtool = yield* ApplyPatchTool
@@ -233,6 +237,8 @@ export const layer: Layer.Layer<
           settingsget: Tool.init(settingsget),
           settingsupdate: Tool.init(settingsupdate),
           popupguide: Tool.init(popupguide),
+      analyticsget: Tool.init(analyticsget),
+      leadsget: Tool.init(leadsget),
           task: Tool.init(task),
           fetch: Tool.init(webfetch),
           imagegen: Tool.init(imagegen),
@@ -264,6 +270,8 @@ export const layer: Layer.Layer<
             tool.settingsget,
             tool.settingsupdate,
             tool.popupguide,
+        tool.analyticsget,
+        tool.leadsget,
             tool.task,
             tool.fetch,
             tool.imagegen,

@@ -1,0 +1,10 @@
+Read this lander's traffic and performance analytics for a date range.
+
+Returns per-day (or per-hour for single-day ranges) visits, unique visits, conversions, clicks, and bot visits, plus lead-capture counts and range totals — all scoped to THIS lander variant only.
+
+- from / to are inclusive calendar dates in YYYY-MM-DD format.
+- timezone is an optional IANA name (e.g. "Europe/Berlin"); defaults to UTC. Use the user's timezone when they clearly have one.
+- Pick a sensible range when the user doesn't specify one (default: the last 7 days, ending today) and SAY which range you used.
+- conversions/clicks depend on the lander's conversion-tracking settings (see settings_get conversions.*) — if they're all zero, tracking may simply be disabled, not traffic missing.
+- If the response reports analytics as temporarily unavailable, the lead counts are still accurate — present those and say traffic data is unavailable right now.
+- If the tool reports no agent token, tell the user analytics can't be read right now and continue with the rest of their request.

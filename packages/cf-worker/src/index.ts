@@ -40,6 +40,14 @@ function randomId(): string {
   return crypto.randomUUID().replace(/-/g, "")
 }
 
+function sessionStub(env: Env, id: string) {
+  const hint = env.SESSIONS_LOCATION_HINT?.trim()
+  return env.SESSIONS.get(
+    env.SESSIONS.idFromName(id),
+    hint ? { locationHint: hint as DurableObjectLocationHint } : undefined,
+  )
+}
+
 app.post("/sessions", async (c) => {
   const id = randomId()
   let body: { apiKey?: string } = {}
@@ -48,7 +56,7 @@ app.post("/sessions", async (c) => {
     if (ct.includes("application/json")) body = (await c.req.json()) as { apiKey?: string }
   } catch {}
   if (body.apiKey && typeof body.apiKey === "string") {
-    const stub = c.env.SESSIONS.get(c.env.SESSIONS.idFromName(id))
+    const stub = sessionStub(c.env, id)
     await stub.fetch("http://do/__do/set-byok", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -113,7 +121,7 @@ app.delete("/sessions/:id/files/:path{.+}", async (c) => {
 
 app.post("/sessions/:id/prompt", async (c) => {
   const id = c.req.param("id")
-  const stub = c.env.SESSIONS.get(c.env.SESSIONS.idFromName(id))
+  const stub = sessionStub(c.env, id)
   const body = await c.req.text()
   return stub.fetch("http://do/__do/run", {
     method: "POST",
@@ -125,19 +133,19 @@ app.post("/sessions/:id/prompt", async (c) => {
 
 app.post("/sessions/:id/attach", async (c) => {
   const id = c.req.param("id")
-  const stub = c.env.SESSIONS.get(c.env.SESSIONS.idFromName(id))
+  const stub = sessionStub(c.env, id)
   return stub.fetch("http://do/__do/attach", { method: "POST", signal: c.req.raw.signal })
 })
 
 app.post("/sessions/:id/cancel", async (c) => {
   const id = c.req.param("id")
-  const stub = c.env.SESSIONS.get(c.env.SESSIONS.idFromName(id))
+  const stub = sessionStub(c.env, id)
   return stub.fetch("http://do/__do/cancel", { method: "POST" })
 })
 
 app.delete("/sessions/:id", async (c) => {
   const id = c.req.param("id")
-  const stub = c.env.SESSIONS.get(c.env.SESSIONS.idFromName(id))
+  const stub = sessionStub(c.env, id)
   return stub.fetch("http://do/__do/teardown", { method: "POST" })
 })
 

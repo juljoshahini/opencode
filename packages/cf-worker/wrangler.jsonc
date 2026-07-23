@@ -22,7 +22,8 @@
     // Preview host. The DO forms the agent's preview URL as
     // ${LANDERLAB_PREVIEW_BASE}/variants/<encryptedVariantId>; the agent can
     // url_screenshot it to see the rendered draft.
-    "LANDERLAB_PREVIEW_BASE": "https://preview.landerlabpages.com"
+    "LANDERLAB_PREVIEW_BASE": "https://preview.landerlabpages.com",
+    "SESSIONS_LOCATION_HINT": "enam"
   },
   "containers": [
     {
